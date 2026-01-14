@@ -1,3 +1,9 @@
+.page {
+  width: 100%;
+  max-width: 1100px;   /* pick what you like: 900 / 1100 / 1200 */
+  margin: 0 auto;
+  padding: 24px;
+}
 
 .logo {
   height: 6em;
