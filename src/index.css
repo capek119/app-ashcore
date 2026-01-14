@@ -23,7 +23,6 @@ a:hover {
 }
 
 body {
-  body {
   margin: 0;
   min-width: 320px;
   min-height: 100vh;
@@ -31,6 +30,12 @@ body {
   background: #0b1220;   /* optional */
 }
 
+#root {
+  min-height: 100vh;
+  display: flex;
+  justify-content: center;  /* horizontal center */
+  align-items: center;      /* vertical center (remove if you don't want) */
+}
 
 h1 {
   font-size: 3.2em;
