@@ -23,12 +23,12 @@ a:hover {
 }
 
 body {
+  body {
   margin: 0;
-  display: flex;
-  justify-content: center; /* horizontal */
-  align-items: center;     /* vertical */
   min-width: 320px;
   min-height: 100vh;
+  display: block;        /* remove flex centering */
+  background: #0b1220;   /* optional */
 }
 
 
