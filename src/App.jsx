@@ -1,5 +1,14 @@
 import React, { useState, useRef } from 'react';
 import * as XLSX from 'xlsx';
+import "./App.css";
+
+export default function App() {
+  return (
+    <div className="page">
+      {/* your existing UI here */}
+    </div>
+  );
+}
 
 // Company Types Configuration
 const COMPANY_TYPES = {
