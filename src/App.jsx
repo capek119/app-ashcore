@@ -1,14 +1,5 @@
 import React, { useState, useRef } from 'react';
 import * as XLSX from 'xlsx';
-import "./App.css";
-
-export default function App() {
-  return (
-    <div className="page">
-      {/* your existing UI here */}
-    </div>
-  );
-}
 
 // Company Types Configuration
 const COMPANY_TYPES = {
@@ -1170,12 +1161,30 @@ export default function App() {
   const [logs, setLogs] = useState([]);
   const [newOb, setNewOb] = useState({ acc: '', amt: '' });
   const fileRef = useRef(null);
+  const priorFSYearRef = useRef(null); // For priorFSYear
   const [priorFSYear, setPriorFSYear] = useState(new Date().getFullYear() - 1);
   const [priorFSApplied, setPriorFSApplied] = useState(false); // Track if prior FS applied
   const [currentYear, setCurrentYear] = useState(new Date().getFullYear());
   const [showExportModal, setShowExportModal] = useState(false);
   const [previewContent, setPreviewContent] = useState(null);
   const [previewType, setPreviewType] = useState(null); // 'html' or 'json'
+  
+  // ========== V9: Persistent Asset ID Generation ==========
+  const didMigratePpeIdsRef = useRef(false);
+  
+  // Generate a unique persistent asset ID (PPE-YYYY-NNNNNN)
+  const nextAssetId = () => {
+    const key = "ashcore_ppe_seq";
+    const seq = Number(localStorage.getItem(key) || "0") + 1;
+    localStorage.setItem(key, String(seq));
+    const year = new Date().getFullYear();
+    return `PPE-${year}-${String(seq).padStart(6, "0")}`;
+  };
+  
+  // ========== V9: CA Rates Configuration State ==========
+  const [caRatesConfig, setCaRatesConfig] = useState(null); // null = use defaults
+  const [effectiveTaxYear, setEffectiveTaxYear] = useState(new Date().getFullYear());
+  const [showCaRatesEditor, setShowCaRatesEditor] = useState(false);
   
   // FS Snapshots - Delivered packs for versioning
   const [fsSnapshots, setFsSnapshots] = useState([]);
@@ -1887,7 +1896,10 @@ export default function App() {
   };
   
   const [ppeRegister, setPpeRegister] = useState([
-    // { id, description, category, acquisitionDate, cost, residualValue, accDepBF, currentDep, accDepCF, nbv }
+    // V9 Enhanced PPE Model:
+    // { id, assetId, description, category, acquisitionDate, cost, residualValue, accDepBF, 
+    //   disposed, disposalDate, disposalProceeds,
+    //   includeForCA, taxCategory, qualifyingCost }
   ]);
   const [inventoryLedger, setInventoryLedger] = useState([
     // { id, itemCode, description, qty, unitCost, totalCost, category }
@@ -1920,25 +1932,182 @@ export default function App() {
     // loanType: 'TERM_LOAN', 'HIRE_PURCHASE', 'MORTGAGE', 'DIRECTORS_LOAN', 'RELATED_PARTY_LOAN', 'OTHER'
   ]);
   
+  // ========== V9: PPE Asset ID Migration Effect ==========
+  // Migrate existing assets that lack assetId (one-time on load)
+  React.useEffect(() => {
+    if (didMigratePpeIdsRef.current) return;
+    if (ppeRegister.length === 0) return;
+    
+    const needsMigration = ppeRegister.some(a => !a.assetId);
+    if (needsMigration) {
+      console.log('[V9] Migrating PPE assets to add persistent assetIds...');
+      setPpeRegister(prev => prev.map(asset => {
+        if (!asset.assetId) {
+          return {
+            ...asset,
+            assetId: nextAssetId(),
+            // Add V9 fields with defaults if missing
+            disposed: asset.disposed ?? false,
+            disposalDate: asset.disposalDate ?? '',
+            disposalProceeds: asset.disposalProceeds ?? 0,
+            includeForCA: asset.includeForCA ?? true,
+            taxCategory: asset.taxCategory ?? asset.category,
+            qualifyingCost: asset.qualifyingCost ?? asset.cost
+          };
+        }
+        return asset;
+      }));
+      didMigratePpeIdsRef.current = true;
+    }
+  }, [ppeRegister]);
+  
   // Subledger helper functions
   const addPPE = () => {
     const id = `ppe_${Date.now()}`;
+    const assetId = nextAssetId(); // V9: Persistent asset ID
     setPpeRegister(prev => [...prev, { 
       id, 
+      assetId, // V9: Persistent asset ID
       description: '', 
       category: 'OFFICE_EQUIPMENT',
       acquisitionDate: '', 
       cost: 0, 
       residualValue: 0, 
-      accDepBF: 0 // Accumulated depreciation brought forward (from prior years)
+      accDepBF: 0, // Accumulated depreciation brought forward (from prior years)
+      // V9: Disposal fields
+      disposed: false,
+      disposalDate: '',
+      disposalProceeds: 0,
+      // V9: CA linkage fields
+      includeForCA: true,
+      taxCategory: 'OFFICE_EQUIPMENT',
+      qualifyingCost: 0
     }]);
   };
   
   const updatePPE = (id, field, value) => {
-    setPpeRegister(prev => prev.map(item => item.id === id ? { ...item, [field]: value } : item));
+    setPpeRegister(prev => prev.map(item => {
+      if (item.id !== id) return item;
+      const updated = { ...item, [field]: value };
+      // V9: Sync qualifyingCost with cost if not manually set
+      if (field === 'cost' && !item._manualQualifyingCost) {
+        updated.qualifyingCost = value;
+      }
+      // V9: Sync taxCategory with category if not manually set
+      if (field === 'category' && !item._manualTaxCategory) {
+        updated.taxCategory = value;
+      }
+      return updated;
+    }));
   };
   
-  const removePPE = (id) => setPpeRegister(prev => prev.filter(item => item.id !== id));
+  // V9: Mark asset as disposed instead of deleting (preserves audit trail)
+  const removePPE = (id) => {
+    const today = new Date().toISOString().split('T')[0];
+    setPpeRegister(prev => prev.map(item => 
+      item.id === id 
+        ? { ...item, disposed: true, disposalDate: today }
+        : item
+    ));
+  };
+  
+  // V9: Permanently delete asset (use with caution - for cleanup only)
+  const permanentlyDeletePPE = (id) => setPpeRegister(prev => prev.filter(item => item.id !== id));
+  
+  // V9: Validate PPE asset (returns array of warnings)
+  const validatePpeAsset = (asset) => {
+    const warnings = [];
+    if (!asset.acquisitionDate) {
+      warnings.push('Missing acquisition date');
+    } else {
+      const acqDate = new Date(asset.acquisitionDate);
+      if (isNaN(acqDate.getTime())) {
+        warnings.push('Invalid acquisition date');
+      }
+    }
+    if ((parseFloat(asset.cost) || 0) <= 0) {
+      warnings.push('Cost must be greater than 0');
+    }
+    if (asset.disposed && asset.disposalDate) {
+      const acqDate = new Date(asset.acquisitionDate);
+      const dispDate = new Date(asset.disposalDate);
+      if (!isNaN(acqDate.getTime()) && !isNaN(dispDate.getTime()) && dispDate < acqDate) {
+        warnings.push('Disposal date cannot be before acquisition date');
+      }
+    }
+    return warnings;
+  };
+  
+  // V9: Calculate pro-rated depreciation by months (for exports/schedules)
+  const calcProratedDep = (asset, yearEndDate, targetYear) => {
+    const cost = parseFloat(asset.cost) || 0;
+    const residual = parseFloat(asset.residualValue) || 0;
+    const accDepBF = parseFloat(asset.accDepBF) || 0;
+    const categoryInfo = PPE_CATEGORIES[asset.category] || PPE_CATEGORIES['OFFICE_EQUIPMENT'];
+    const usefulLife = categoryInfo.years;
+    
+    // No depreciation for land or fully depreciated assets
+    if (usefulLife === 0) return { monthsUsed: 0, proratedDep: 0, warning: null };
+    
+    const depreciableAmount = Math.max(0, cost - residual);
+    const annualDep = depreciableAmount / usefulLife;
+    
+    // Parse acquisition date
+    let acqYear = null, acqMonth = null;
+    let warning = null;
+    if (asset.acquisitionDate) {
+      const acqDate = new Date(asset.acquisitionDate);
+      if (!isNaN(acqDate.getTime())) {
+        acqYear = acqDate.getFullYear();
+        acqMonth = acqDate.getMonth() + 1; // 1-12
+      } else {
+        warning = 'Invalid acquisition date - assuming full year';
+      }
+    } else {
+      warning = 'Missing acquisition date - assuming full year';
+    }
+    
+    // Determine months used
+    let monthsUsed = 12;
+    
+    if (acqYear !== null) {
+      if (acqYear > targetYear) {
+        // Asset acquired in future year - no depreciation
+        return { monthsUsed: 0, proratedDep: 0, warning: 'Asset not yet acquired' };
+      } else if (acqYear === targetYear) {
+        // Acquired in current year - prorate from acquisition month (inclusive)
+        monthsUsed = 12 - acqMonth + 1;
+      }
+      // If acqYear < targetYear, full 12 months
+    }
+    
+    // V9: Handle disposal - stop depreciation at disposal month
+    if (asset.disposed && asset.disposalDate) {
+      const dispDate = new Date(asset.disposalDate);
+      if (!isNaN(dispDate.getTime())) {
+        const dispYear = dispDate.getFullYear();
+        const dispMonth = dispDate.getMonth() + 1;
+        
+        if (dispYear < targetYear) {
+          // Disposed in prior year - no depreciation
+          return { monthsUsed: 0, proratedDep: 0, warning: 'Asset disposed in prior year' };
+        } else if (dispYear === targetYear) {
+          // Disposed in current year - depreciate up to disposal month (inclusive)
+          const maxMonths = dispMonth;
+          monthsUsed = Math.min(monthsUsed, maxMonths);
+        }
+      }
+    }
+    
+    // Calculate pro-rated depreciation
+    const proratedDep = annualDep * (monthsUsed / 12);
+    
+    // Cap so accumulated depreciation never exceeds depreciable amount
+    const maxAllowedDep = Math.max(0, depreciableAmount - accDepBF);
+    const cappedDep = Math.min(proratedDep, maxAllowedDep);
+    
+    return { monthsUsed, proratedDep: cappedDep, warning };
+  };
   
   // Calculate PPE depreciation for each asset
   const calculatePPEDepreciation = (asset) => {
@@ -1996,8 +2165,132 @@ export default function App() {
     'SMALL_VALUE': { ia: 0, aa: 100, label: 'Small Value Asset (<RM2000)' }, // Full write-off
   };
   
+  // ========== V9: CA Rates Configuration System ==========
+  // Load CA rates from localStorage or use defaults
+  const getCaRatesStorageKey = (year) => `ashcore_ca_rates_${year}`;
+  
+  // Get effective CA rates for a given year (with fallback to defaults)
+  const getCaRates = (year) => {
+    const key = getCaRatesStorageKey(year);
+    try {
+      const stored = localStorage.getItem(key);
+      if (stored) {
+        const parsed = JSON.parse(stored);
+        // Merge with defaults to ensure all categories exist
+        const merged = { ...DEFAULT_CA_RATES };
+        Object.keys(parsed).forEach(cat => {
+          if (merged[cat]) {
+            merged[cat] = { ...merged[cat], ...parsed[cat] };
+          } else {
+            merged[cat] = parsed[cat];
+          }
+        });
+        return { rates: merged, isDefault: false };
+      }
+    } catch (e) {
+      console.warn('[V9] Error loading CA rates from localStorage:', e);
+    }
+    return { rates: DEFAULT_CA_RATES, isDefault: true };
+  };
+  
+  // Save CA rates to localStorage
+  const saveCaRates = (year, rates) => {
+    const key = getCaRatesStorageKey(year);
+    try {
+      localStorage.setItem(key, JSON.stringify(rates));
+      setCaRatesConfig(rates);
+      console.log(`[V9] CA rates saved for year ${year}`);
+    } catch (e) {
+      console.error('[V9] Error saving CA rates:', e);
+    }
+  };
+  
+  // Reset CA rates to defaults
+  const resetCaRatesToDefaults = (year) => {
+    const key = getCaRatesStorageKey(year);
+    try {
+      localStorage.removeItem(key);
+      setCaRatesConfig(null);
+      console.log(`[V9] CA rates reset to defaults for year ${year}`);
+    } catch (e) {
+      console.error('[V9] Error resetting CA rates:', e);
+    }
+  };
+  
+  // Validate CA rate entry
+  const validateCaRate = (rate) => {
+    const warnings = [];
+    const ia = parseFloat(rate.ia);
+    const aa = parseFloat(rate.aa);
+    if (isNaN(ia) || ia < 0 || ia > 100) warnings.push('IA% must be 0-100');
+    if (isNaN(aa) || aa < 0 || aa > 100) warnings.push('AA% must be 0-100');
+    if (!rate.label || rate.label.trim() === '') warnings.push('Label is required');
+    return warnings;
+  };
+  
+  // Load CA rates on mount and when effectiveTaxYear changes
+  React.useEffect(() => {
+    const { rates, isDefault } = getCaRates(effectiveTaxYear);
+    setCaRatesConfig(isDefault ? null : rates);
+  }, [effectiveTaxYear]);
+  
+  // Get the current effective CA rates (for computations)
+  const getEffectiveCaRates = () => {
+    if (caRatesConfig) return caRatesConfig;
+    return DEFAULT_CA_RATES;
+  };
+  
+  // Check if using default rates (for warning banner)
+  const isUsingDefaultCaRates = () => caRatesConfig === null;
+  
+  // ========== V9: Derived CA Items from PPE ==========
+  // Derive CA items from PPE assets where includeForCA=true and not disposed
+  const getDerivedCaItems = () => {
+    return ppeRegister
+      .filter(asset => asset.includeForCA && !asset.disposed)
+      .map(asset => ({
+        id: `derived_${asset.id}`,
+        assetId: asset.assetId,
+        sourceType: 'PPE',
+        acquisitionDate: asset.acquisitionDate,
+        description: asset.description,
+        category: asset.taxCategory || asset.category,
+        cost: parseFloat(asset.qualifyingCost) || parseFloat(asset.cost) || 0
+      }));
+  };
+  
+  // Merge derived CA items with manual overrides
+  const getFinalCaItems = () => {
+    const derived = getDerivedCaItems();
+    const manual = caScheduleItems;
+    
+    // Create a map of manual items by assetId for quick lookup
+    const manualByAssetId = new Map();
+    manual.forEach(item => {
+      if (item.assetId) {
+        manualByAssetId.set(item.assetId, item);
+      }
+    });
+    
+    // Merge: prefer manual overrides for items with matching assetId
+    const merged = derived.map(derivedItem => {
+      const override = manualByAssetId.get(derivedItem.assetId);
+      if (override) {
+        // Manual override exists - use it but mark as override
+        return { ...override, isOverride: true, sourceAssetId: derivedItem.assetId };
+      }
+      return { ...derivedItem, isOverride: false };
+    });
+    
+    // Add manual items without assetId (independent CA items)
+    const independentManual = manual.filter(item => !item.assetId);
+    
+    return [...merged, ...independentManual];
+  };
+  
   // CA Schedule - Independent user-input schedule
-  // Structure: [{ id, acquisitionDate, description, category, cost }]
+  // V9: Now includes optional assetId for linking to PPE
+  // Structure: [{ id, assetId?, acquisitionDate, description, category, cost, isOverride? }]
   const [caScheduleItems, setCaScheduleItems] = useState([]);
   
   // Add new CA Schedule item
@@ -2005,6 +2298,7 @@ export default function App() {
     const id = `ca_${Date.now()}`;
     setCaScheduleItems(prev => [...prev, {
       id,
+      assetId: null, // V9: No link to PPE by default (manual entry)
       acquisitionDate: '',
       description: '',
       category: 'OFFICE_EQUIPMENT',
@@ -2025,43 +2319,60 @@ export default function App() {
   };
   
   // Calculate CA for a single item based on acquisition date
+  // V9: Uses configurable rates and fixed current year test
   const calculateItemCA = (item) => {
     const cost = parseFloat(item.cost) || 0;
-    const rates = DEFAULT_CA_RATES[item.category] || DEFAULT_CA_RATES['OFFICE_EQUIPMENT'];
+    const effectiveRates = getEffectiveCaRates();
+    const rates = effectiveRates[item.category] || effectiveRates['OFFICE_EQUIPMENT'] || DEFAULT_CA_RATES['OFFICE_EQUIPMENT'];
     const currentYearNum = parseInt(currentYear) || new Date().getFullYear();
     
     // Parse acquisition date
     let acquisitionYear = currentYearNum;
+    let warning = null;
     if (item.acquisitionDate) {
       const date = new Date(item.acquisitionDate);
       if (!isNaN(date.getTime())) {
         acquisitionYear = date.getFullYear();
+        // V9: Warn if future date
+        if (acquisitionYear > currentYearNum) {
+          warning = 'Asset acquisition date is in the future';
+        }
       }
     }
     
-    // Calculate CA based on acquisition year
-    // If acquired in current FYE year → IA + AA
+    // V9 FIX: Calculate CA based on acquisition year
+    // If acquired in current FYE year (exactly) → IA + AA
     // If acquired in prior years → AA only (assuming IA already claimed)
-    const isCurrentYear = acquisitionYear >= currentYearNum;
+    // If acquired in future → no CA
+    const isCurrentYear = acquisitionYear === currentYearNum; // V9: Changed from >= to ===
+    const isFutureYear = acquisitionYear > currentYearNum;
+    
+    if (isFutureYear) {
+      return { ia: 0, aa: 0, totalCA: 0, isCurrentYear: false, isFutureYear: true, rates, warning };
+    }
     
     const ia = isCurrentYear ? cost * (rates.ia / 100) : 0;
     const aa = cost * (rates.aa / 100);
     const totalCA = ia + aa;
     
-    return { ia, aa, totalCA, isCurrentYear, rates };
+    return { ia, aa, totalCA, isCurrentYear, isFutureYear: false, rates, warning };
   };
   
   // Compute total Capital Allowance from CA Schedule
+  // V9: Uses merged final CA items
   const computeTotalCapitalAllowance = () => {
-    return caScheduleItems.reduce((total, item) => {
+    const finalItems = getFinalCaItems();
+    return finalItems.reduce((total, item) => {
       const calc = calculateItemCA(item);
       return total + calc.totalCA;
     }, 0);
   };
   
   // Get total CA Schedule cost
+  // V9: Uses merged final CA items
   const getTotalCAScheduleCost = () => {
-    return caScheduleItems.reduce((sum, item) => sum + (parseFloat(item.cost) || 0), 0);
+    const finalItems = getFinalCaItems();
+    return finalItems.reduce((sum, item) => sum + (parseFloat(item.cost) || 0), 0);
   };
   
   // Get total PPE cost from subledger
@@ -7327,18 +7638,29 @@ ${res.bs.borr > 0 ? `<h3>10. ${isEN ? 'BORROWINGS' : 'PINJAMAN'}</h3>
   };
 
   // Export PPE Register
+  // V9: Enhanced with persistent assetId, disposal status, and CA fields
   const exportPPERegister = (format = 'xlsx') => {
-    const headers = ['GL Code', 'Asset ID', 'Description', 'Category', 'Acquisition Date', 'Cost (RM)', 'Useful Life (Yrs)', 'Dep Rate (%)', 'Acc Dep B/F (RM)', 'Current Dep (RM)', 'Acc Dep C/F (RM)', 'NBV (RM)'];
-    const data = ppeRegister.map((asset, i) => {
+    const headers = ['GL Code', 'Asset ID', 'Description', 'Category', 'Acquisition Date', 'Cost (RM)', 'Useful Life (Yrs)', 'Dep Rate (%)', 'Acc Dep B/F (RM)', 'Current Dep (RM)', 'Acc Dep C/F (RM)', 'NBV (RM)', 'Status', 'Disposal Date', 'Disposal Proceeds', 'Include CA', 'Tax Category', 'Qualifying Cost'];
+    const currentYearNum = parseInt(currentYear) || new Date().getFullYear();
+    
+    // V9: Filter out disposed assets by default, or show with status
+    const activeAssets = ppeRegister.filter(a => !a.disposed);
+    const disposedAssets = ppeRegister.filter(a => a.disposed);
+    
+    const mapAssetToRow = (asset) => {
       const categoryInfo = PPE_CATEGORIES[asset.category] || PPE_CATEGORIES['OFFICE_EQUIPMENT'];
       const cost = parseFloat(asset.cost) || 0;
       const accDepBF = parseFloat(asset.accDepBF) || 0;
-      const currentDep = Math.min(cost * (categoryInfo.rate / 100), cost - accDepBF);
+      
+      // V9: Use pro-rated depreciation for current year
+      const { proratedDep } = calcProratedDep(asset, null, currentYearNum);
+      const currentDep = asset.disposed ? 0 : proratedDep;
       const accDepCF = accDepBF + currentDep;
       const nbv = cost - accDepCF;
+      
       return [
         '1000',
-        `PPE-${String(i + 1).padStart(3, '0')}`,
+        asset.assetId || `PPE-LEGACY-${asset.id}`, // V9: Use persistent assetId
         asset.description,
         categoryInfo.label,
         asset.acquisitionDate,
@@ -7348,11 +7670,19 @@ ${res.bs.borr > 0 ? `<h3>10. ${isEN ? 'BORROWINGS' : 'PINJAMAN'}</h3>
         accDepBF,
         currentDep,
         accDepCF,
-        nbv
+        nbv,
+        asset.disposed ? 'DISPOSED' : 'ACTIVE',
+        asset.disposalDate || '',
+        parseFloat(asset.disposalProceeds) || 0,
+        asset.includeForCA ? 'Yes' : 'No',
+        asset.taxCategory || asset.category,
+        parseFloat(asset.qualifyingCost) || cost
       ];
-    });
+    };
     
-    // Add totals row
+    const data = activeAssets.map(mapAssetToRow);
+    
+    // Add totals for active assets
     const totals = data.reduce((acc, row) => {
       acc.cost += parseFloat(row[5]) || 0;
       acc.accDepBF += parseFloat(row[8]) || 0;
@@ -7362,7 +7692,14 @@ ${res.bs.borr > 0 ? `<h3>10. ${isEN ? 'BORROWINGS' : 'PINJAMAN'}</h3>
       return acc;
     }, { cost: 0, accDepBF: 0, currentDep: 0, accDepCF: 0, nbv: 0 });
     
-    data.push(['', '', 'TOTAL', '', '', totals.cost, '', '', totals.accDepBF, totals.currentDep, totals.accDepCF, totals.nbv]);
+    data.push(['', '', 'TOTAL (ACTIVE)', '', '', totals.cost, '', '', totals.accDepBF, totals.currentDep, totals.accDepCF, totals.nbv, '', '', '', '', '', '']);
+    
+    // Add disposed assets section if any
+    if (disposedAssets.length > 0) {
+      data.push(['', '', '', '', '', '', '', '', '', '', '', '', '', '', '', '', '', '']); // Blank row
+      data.push(['', '', '--- DISPOSED ASSETS ---', '', '', '', '', '', '', '', '', '', '', '', '', '', '', '']);
+      disposedAssets.forEach(asset => data.push(mapAssetToRow(asset)));
+    }
     
     exportData(data, headers, `PPE_Register_${companyName.replace(/\s+/g, '_')}_${currentYear}`, 'PPE Register', format);
   };
@@ -7490,17 +7827,36 @@ ${res.bs.borr > 0 ? `<h3>10. ${isEN ? 'BORROWINGS' : 'PINJAMAN'}</h3>
   };
 
   // Export All Subledgers to single Excel file with multiple sheets
+  // V9: Uses persistent assetId and includes disposal/CA fields
   const exportAllSubledgersExcel = () => {
     const wb = XLSX.utils.book_new();
+    const currentYearNum = parseInt(currentYear) || new Date().getFullYear();
     
-    // PPE Register
-    const ppeHeaders = ['GL Code', 'Asset ID', 'Description', 'Category', 'Acquisition Date', 'Cost (RM)', 'Useful Life', 'Dep Rate (%)', 'Acc Dep B/F', 'Current Dep', 'Acc Dep C/F', 'NBV'];
-    const ppeData = ppeRegister.map((asset, i) => {
+    // PPE Register - V9: Enhanced headers and persistent assetId
+    const ppeHeaders = ['GL Code', 'Asset ID', 'Description', 'Category', 'Acquisition Date', 'Cost (RM)', 'Useful Life', 'Dep Rate (%)', 'Acc Dep B/F', 'Current Dep', 'Acc Dep C/F', 'NBV', 'Status', 'Include CA'];
+    const activeAssets = ppeRegister.filter(a => !a.disposed);
+    const ppeData = activeAssets.map((asset) => {
       const categoryInfo = PPE_CATEGORIES[asset.category] || PPE_CATEGORIES['OFFICE_EQUIPMENT'];
       const cost = parseFloat(asset.cost) || 0;
       const accDepBF = parseFloat(asset.accDepBF) || 0;
-      const currentDep = Math.min(cost * (categoryInfo.rate / 100), cost - accDepBF);
-      return ['1000', `PPE-${String(i + 1).padStart(3, '0')}`, asset.description, categoryInfo.label, asset.acquisitionDate, cost, categoryInfo.years, categoryInfo.rate, accDepBF, currentDep, accDepBF + currentDep, cost - accDepBF - currentDep];
+      const { proratedDep } = calcProratedDep(asset, null, currentYearNum);
+      const currentDep = proratedDep;
+      return [
+        '1000', 
+        asset.assetId || `PPE-LEGACY-${asset.id}`, // V9: Use persistent assetId
+        asset.description, 
+        categoryInfo.label, 
+        asset.acquisitionDate, 
+        cost, 
+        categoryInfo.years, 
+        categoryInfo.rate, 
+        accDepBF, 
+        currentDep, 
+        accDepBF + currentDep, 
+        cost - accDepBF - currentDep,
+        'ACTIVE',
+        asset.includeForCA ? 'Yes' : 'No'
+      ];
     });
     const ppeWs = XLSX.utils.aoa_to_sheet([ppeHeaders, ...ppeData]);
     XLSX.utils.book_append_sheet(wb, ppeWs, 'PPE Register');
@@ -7632,7 +7988,7 @@ ${res.bs.borr > 0 ? `<h3>10. ${isEN ? 'BORROWINGS' : 'PINJAMAN'}</h3>
   // Save entire session to file
   const saveSession = () => {
     const sessionData = {
-      version: '1.2', // Updated for snapshots and adjustment log
+      version: '1.3', // V9: Updated for persistent assetId and CA rates
       savedAt: new Date().toISOString(),
       // Company info
       companyName,
@@ -7663,6 +8019,8 @@ ${res.bs.borr > 0 ? `<h3>10. ${isEN ? 'BORROWINGS' : 'PINJAMAN'}</h3>
       longTermBorrowings,
       // Capital Allowance Schedule
       caScheduleItems,
+      // V9: CA Rates configuration
+      effectiveTaxYear,
       // Tax settings
       taxSettings,
       // Snapshots and adjustments
@@ -7731,6 +8089,9 @@ ${res.bs.borr > 0 ? `<h3>10. ${isEN ? 'BORROWINGS' : 'PINJAMAN'}</h3>
         
         // Restore Capital Allowance Schedule
         if (data.caScheduleItems) setCaScheduleItems(data.caScheduleItems);
+        
+        // V9: Restore effective tax year
+        if (data.effectiveTaxYear) setEffectiveTaxYear(data.effectiveTaxYear);
         
         // Restore snapshots and adjustments (v1.2+)
         if (data.fsSnapshots) setFsSnapshots(data.fsSnapshots);
@@ -10341,54 +10702,116 @@ ${res.bs.borr > 0 ? `<h3>10. ${isEN ? 'BORROWINGS' : 'PINJAMAN'}</h3>
             </div>
             
             <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 16 }}>
-              {/* PPE Register */}
+              {/* PPE Register - V9 Enhanced with Asset ID, Acquisition Date, CA Toggle, Disposal */}
               <div style={{ background: 'rgba(31,41,55,0.6)', borderRadius: 10, border: '1px solid rgba(75,85,99,0.3)', overflow: 'hidden', gridColumn: 'span 2' }}>
                 <div style={{ padding: '10px 16px', borderBottom: '1px solid rgba(75,85,99,0.2)', display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
                   <div style={{ display: 'flex', alignItems: 'center', gap: 12 }}>
                     <span style={{ fontWeight: 700, fontSize: 13 }}>🏭 PPE Register (Fixed Assets)</span>
-                    <span style={{ fontSize: 9, color: '#9ca3af', background: 'rgba(99,102,241,0.1)', padding: '2px 8px', borderRadius: 4 }}>MFRS 116 Straight-Line Method</span>
+                    <span style={{ fontSize: 9, color: '#34d399', background: 'rgba(52,211,153,0.1)', padding: '2px 8px', borderRadius: 4 }}>V9: Asset ID | Acq Date | CA Toggle | Disposal</span>
                   </div>
                   <button onClick={addPPE} style={{ padding: '4px 10px', background: 'rgba(99,102,241,0.2)', border: 'none', borderRadius: 4, color: '#a5b4fc', fontSize: 10, cursor: 'pointer' }}>+ Add Asset</button>
                 </div>
                 <div style={{ padding: 12, overflowX: 'auto' }}>
-                  {ppeRegister.length === 0 ? (
-                    <div style={{ padding: 20, textAlign: 'center', color: '#6b7280', fontSize: 11 }}>No assets registered. Click "+ Add Asset" to add.</div>
+                  {ppeRegister.filter(a => !a.disposed).length === 0 ? (
+                    <div style={{ padding: 20, textAlign: 'center', color: '#6b7280', fontSize: 11 }}>No active assets registered. Click "+ Add Asset" to add.</div>
                   ) : (
                     <>
-                      <div style={{ display: 'grid', gridTemplateColumns: '1fr 130px 70px 40px 60px 60px 60px 60px 20px', gap: 4, padding: '6px 8px', background: 'rgba(99,102,241,0.1)', borderRadius: 4, fontSize: 8, fontWeight: 600, color: '#9ca3af', marginBottom: 4, minWidth: 700 }}>
+                      {/* V9 Enhanced Header */}
+                      <div style={{ display: 'grid', gridTemplateColumns: '75px 1fr 110px 80px 65px 35px 55px 55px 55px 55px 30px 22px', gap: 4, padding: '6px 8px', background: 'rgba(99,102,241,0.1)', borderRadius: 4, fontSize: 8, fontWeight: 600, color: '#9ca3af', marginBottom: 4, minWidth: 800 }}>
+                        <span>Asset ID</span>
                         <span>Description</span>
                         <span>Category</span>
+                        <span>Acq Date</span>
                         <span style={{ textAlign: 'right' }}>Cost</span>
                         <span style={{ textAlign: 'center' }}>Life</span>
-                        <span style={{ textAlign: 'right' }}>Acc Dep B/F</span>
-                        <span style={{ textAlign: 'right' }}>Current Dep</span>
-                        <span style={{ textAlign: 'right' }}>Acc Dep C/F</span>
+                        <span style={{ textAlign: 'right' }}>Acc B/F</span>
+                        <span style={{ textAlign: 'right' }}>Cur Dep</span>
+                        <span style={{ textAlign: 'right' }}>Acc C/F</span>
                         <span style={{ textAlign: 'right' }}>NBV</span>
+                        <span style={{ textAlign: 'center' }}>CA?</span>
                         <span></span>
                       </div>
-                      {ppeRegister.map((item, i) => {
+                      {/* Active Assets */}
+                      {ppeRegister.filter(a => !a.disposed).map((item, i) => {
                         const dep = calculatePPEDepreciation(item);
                         const categoryInfo = PPE_CATEGORIES[item.category] || PPE_CATEGORIES['OFFICE_EQUIPMENT'];
+                        const warnings = validatePpeAsset(item);
+                        const hasWarning = warnings.length > 0;
                         return (
-                          <div key={item.id} style={{ display: 'grid', gridTemplateColumns: '1fr 130px 70px 40px 60px 60px 60px 60px 20px', gap: 4, padding: '4px 8px', background: i % 2 ? 'transparent' : 'rgba(17,24,39,0.3)', borderRadius: 4, alignItems: 'center', fontSize: 9, minWidth: 700 }}>
+                          <div key={item.id} style={{ display: 'grid', gridTemplateColumns: '75px 1fr 110px 80px 65px 35px 55px 55px 55px 55px 30px 22px', gap: 4, padding: '4px 8px', background: hasWarning ? 'rgba(251,191,36,0.1)' : (i % 2 ? 'transparent' : 'rgba(17,24,39,0.3)'), borderRadius: 4, alignItems: 'center', fontSize: 9, minWidth: 800, border: hasWarning ? '1px solid rgba(251,191,36,0.3)' : 'none' }}>
+                            {/* Asset ID (read-only) */}
+                            <span style={{ fontFamily: 'monospace', fontSize: 7, color: '#6b7280', overflow: 'hidden', textOverflow: 'ellipsis' }} title={item.assetId || 'Not assigned'}>{item.assetId ? item.assetId.slice(-12) : 'N/A'}</span>
+                            {/* Description */}
                             <input value={item.description} onChange={e => updatePPE(item.id, 'description', e.target.value)} placeholder="Asset name" style={{ ...inputStyle, padding: '3px 6px', fontSize: 9 }} />
+                            {/* Category */}
                             <select value={item.category} onChange={e => updatePPE(item.id, 'category', e.target.value)} style={{ ...inputStyle, padding: '3px 4px', fontSize: 8, cursor: 'pointer' }}>
                               {Object.entries(PPE_CATEGORIES).map(([key, cat]) => (
-                                <option key={key} value={key}>{cat.label} ({cat.years > 0 ? `${cat.years}yr` : 'N/A'})</option>
+                                <option key={key} value={key}>{cat.label}</option>
                               ))}
                             </select>
+                            {/* Acquisition Date - V9 NEW */}
+                            <input type="date" value={item.acquisitionDate || ''} onChange={e => updatePPE(item.id, 'acquisitionDate', e.target.value)} style={{ ...inputStyle, padding: '2px 4px', fontSize: 8 }} title={hasWarning ? warnings.join(', ') : 'Acquisition date'} />
+                            {/* Cost */}
                             <input type="number" value={item.cost} onChange={e => updatePPE(item.id, 'cost', e.target.value)} style={{ ...numInputStyle, padding: '3px 4px', fontSize: 9 }} />
-                            <span style={{ textAlign: 'center', fontSize: 8, color: '#9ca3af' }}>{categoryInfo.years > 0 ? `${categoryInfo.years}yr` : '-'}</span>
+                            {/* Life */}
+                            <span style={{ textAlign: 'center', fontSize: 8, color: '#9ca3af' }}>{categoryInfo.years > 0 ? `${categoryInfo.years}y` : '-'}</span>
+                            {/* Acc Dep B/F */}
                             <input type="number" value={item.accDepBF} onChange={e => updatePPE(item.id, 'accDepBF', e.target.value)} placeholder="0" style={{ ...numInputStyle, padding: '3px 4px', fontSize: 9 }} />
+                            {/* Current Dep */}
                             <span style={{ fontFamily: 'monospace', fontSize: 9, color: '#fbbf24', textAlign: 'right' }}>{dep.currentDep > 0 ? fmt(dep.currentDep).replace('MYR ', '') : '-'}</span>
+                            {/* Acc Dep C/F */}
                             <span style={{ fontFamily: 'monospace', fontSize: 9, color: '#f87171', textAlign: 'right' }}>{fmt(dep.accDepCF).replace('MYR ', '')}</span>
+                            {/* NBV */}
                             <span style={{ fontFamily: 'monospace', fontSize: 9, color: '#34d399', textAlign: 'right', fontWeight: 600 }}>{fmt(dep.nbv).replace('MYR ', '')}</span>
-                            <button onClick={() => removePPE(item.id)} style={{ width: 16, height: 16, background: 'rgba(239,68,68,0.2)', border: 'none', borderRadius: 2, color: '#f87171', cursor: 'pointer', fontSize: 9 }}>×</button>
+                            {/* CA Toggle - V9 NEW */}
+                            <div style={{ textAlign: 'center' }}>
+                              <input type="checkbox" checked={item.includeForCA !== false} onChange={e => updatePPE(item.id, 'includeForCA', e.target.checked)} style={{ cursor: 'pointer', width: 14, height: 14 }} title="Include in Capital Allowance calculation" />
+                            </div>
+                            {/* Dispose Button - V9: Now marks as disposed instead of deleting */}
+                            <button onClick={() => removePPE(item.id)} style={{ width: 18, height: 18, background: 'rgba(239,68,68,0.2)', border: 'none', borderRadius: 2, color: '#f87171', cursor: 'pointer', fontSize: 10 }} title="Mark as disposed">×</button>
                           </div>
                         );
                       })}
-                      <div style={{ display: 'grid', gridTemplateColumns: '1fr 130px 70px 40px 60px 60px 60px 60px 20px', gap: 4, padding: '8px', background: 'rgba(99,102,241,0.15)', borderRadius: 4, marginTop: 8, fontSize: 9, fontWeight: 700, minWidth: 700 }}>
-                        <span>TOTAL</span>
+                      
+                      {/* V9: Disposed Assets Section */}
+                      {ppeRegister.filter(a => a.disposed).length > 0 && (
+                        <details style={{ marginTop: 12, background: 'rgba(239,68,68,0.05)', borderRadius: 6, border: '1px solid rgba(239,68,68,0.2)' }}>
+                          <summary style={{ cursor: 'pointer', fontSize: 10, color: '#f87171', padding: '8px 12px', fontWeight: 600 }}>
+                            📦 Disposed Assets ({ppeRegister.filter(a => a.disposed).length}) - Click to expand
+                          </summary>
+                          <div style={{ padding: '8px 12px' }}>
+                            <div style={{ display: 'grid', gridTemplateColumns: '80px 1fr 100px 80px 70px 80px 30px', gap: 4, padding: '4px 8px', background: 'rgba(239,68,68,0.1)', borderRadius: 4, fontSize: 8, fontWeight: 600, color: '#9ca3af', marginBottom: 4 }}>
+                              <span>Asset ID</span>
+                              <span>Description</span>
+                              <span>Category</span>
+                              <span>Disposal Date</span>
+                              <span style={{ textAlign: 'right' }}>Cost</span>
+                              <span style={{ textAlign: 'right' }}>Proceeds</span>
+                              <span></span>
+                            </div>
+                            {ppeRegister.filter(a => a.disposed).map((item) => {
+                              const categoryInfo = PPE_CATEGORIES[item.category] || PPE_CATEGORIES['OFFICE_EQUIPMENT'];
+                              return (
+                                <div key={item.id} style={{ display: 'grid', gridTemplateColumns: '80px 1fr 100px 80px 70px 80px 30px', gap: 4, padding: '4px 8px', background: 'rgba(17,24,39,0.3)', borderRadius: 4, alignItems: 'center', fontSize: 9, marginBottom: 2, opacity: 0.8 }}>
+                                  <span style={{ fontFamily: 'monospace', fontSize: 7, color: '#6b7280' }}>{item.assetId ? item.assetId.slice(-12) : 'N/A'}</span>
+                                  <span style={{ textDecoration: 'line-through', color: '#9ca3af' }}>{item.description}</span>
+                                  <span style={{ color: '#9ca3af', fontSize: 8 }}>{categoryInfo.label}</span>
+                                  <input type="date" value={item.disposalDate || ''} onChange={e => updatePPE(item.id, 'disposalDate', e.target.value)} style={{ ...inputStyle, padding: '2px 4px', fontSize: 8, background: 'rgba(239,68,68,0.1)' }} />
+                                  <span style={{ fontFamily: 'monospace', fontSize: 9, textAlign: 'right', color: '#9ca3af' }}>{fmt(parseFloat(item.cost) || 0).replace('MYR ', '')}</span>
+                                  <input type="number" value={item.disposalProceeds || 0} onChange={e => updatePPE(item.id, 'disposalProceeds', e.target.value)} placeholder="0" style={{ ...numInputStyle, padding: '2px 4px', fontSize: 8, background: 'rgba(52,211,153,0.1)' }} title="Disposal proceeds" />
+                                  <button onClick={() => permanentlyDeletePPE(item.id)} style={{ width: 18, height: 18, background: 'rgba(239,68,68,0.3)', border: 'none', borderRadius: 2, color: '#f87171', cursor: 'pointer', fontSize: 10 }} title="Permanently delete">🗑</button>
+                                </div>
+                              );
+                            })}
+                          </div>
+                        </details>
+                      )}
+                      
+                      {/* Totals Row */}
+                      <div style={{ display: 'grid', gridTemplateColumns: '75px 1fr 110px 80px 65px 35px 55px 55px 55px 55px 30px 22px', gap: 4, padding: '8px', background: 'rgba(99,102,241,0.15)', borderRadius: 4, marginTop: 8, fontSize: 9, fontWeight: 700, minWidth: 800 }}>
+                        <span></span>
+                        <span>TOTAL (Active: {ppeRegister.filter(a => !a.disposed).length})</span>
+                        <span></span>
                         <span></span>
                         <span style={{ fontFamily: 'monospace', textAlign: 'right' }}>{fmt(subledgerTotals.ppe.cost).replace('MYR ', '')}</span>
                         <span></span>
@@ -10396,6 +10819,7 @@ ${res.bs.borr > 0 ? `<h3>10. ${isEN ? 'BORROWINGS' : 'PINJAMAN'}</h3>
                         <span style={{ fontFamily: 'monospace', color: '#fbbf24', textAlign: 'right' }}>{fmt(subledgerTotals.ppe.currentDep).replace('MYR ', '')}</span>
                         <span style={{ fontFamily: 'monospace', color: '#f87171', textAlign: 'right' }}>{fmt(subledgerTotals.ppe.accDepCF).replace('MYR ', '')}</span>
                         <span style={{ fontFamily: 'monospace', color: '#34d399', textAlign: 'right' }}>{fmt(subledgerTotals.ppe.nbv).replace('MYR ', '')}</span>
+                        <span style={{ fontSize: 8, textAlign: 'center', color: '#a5b4fc' }} title="Assets included for CA">{ppeRegister.filter(a => !a.disposed && a.includeForCA !== false).length}</span>
                         <span></span>
                       </div>
                       
@@ -10405,7 +10829,7 @@ ${res.bs.borr > 0 ? `<h3>10. ${isEN ? 'BORROWINGS' : 'PINJAMAN'}</h3>
                         <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(150px, 1fr))', gap: 8 }}>
                           {(() => {
                             const byCat = {};
-                            ppeRegister.forEach(item => {
+                            ppeRegister.filter(a => !a.disposed).forEach(item => {
                               const cat = item.category || 'OFFICE_EQUIPMENT';
                               const dep = calculatePPEDepreciation(item);
                               if (!byCat[cat]) byCat[cat] = { cost: 0, currentDep: 0, nbv: 0, count: 0 };
@@ -12420,6 +12844,10 @@ ${res.bs.borr > 0 ? `<h3>10. ${isEN ? 'BORROWINGS' : 'PINJAMAN'}</h3>
                   {companyType === 'ENTERPRISE' && (
                     <div style={{ fontSize: 9, color: '#fbbf24', marginTop: 2 }}>💡 Sole proprietors & partnerships can also claim CA on business assets</div>
                   )}
+                  {/* V9: Show source info */}
+                  <div style={{ fontSize: 9, color: '#34d399', marginTop: 4 }}>
+                    ✓ V9: Auto-derived from PPE Register (CA toggle ON) + Manual entries
+                  </div>
                 </div>
                 <div style={{ display: 'flex', alignItems: 'center', gap: 16 }}>
                   {/* Cost Reconciliation Check */}
@@ -12444,180 +12872,270 @@ ${res.bs.borr > 0 ? `<h3>10. ${isEN ? 'BORROWINGS' : 'PINJAMAN'}</h3>
               </div>
                 
                 <div style={{ padding: 12 }}>
-                  {/* Header Row */}
-                  <div style={{ display: 'grid', gridTemplateColumns: '100px 180px 140px 90px 60px 60px 80px 30px', padding: '8px 10px', background: 'rgba(99,102,241,0.1)', borderRadius: 4, fontSize: 9, fontWeight: 600, color: '#9ca3af', marginBottom: 4, gap: 8 }}>
-                    <span>Acquisition Date</span>
-                    <span>Asset Description</span>
-                    <span>Category</span>
-                    <span style={{ textAlign: 'right' }}>Cost (RM)</span>
-                    <span style={{ textAlign: 'center' }}>IA %</span>
-                    <span style={{ textAlign: 'center' }}>AA %</span>
-                    <span style={{ textAlign: 'right' }}>CA Amount</span>
-                    <span></span>
-                  </div>
-                  
-                  {/* Asset Rows */}
-                  {caScheduleItems.map((item, i) => {
-                    const calc = calculateItemCA(item);
-                    const rates = DEFAULT_CA_RATES[item.category] || DEFAULT_CA_RATES['OFFICE_EQUIPMENT'];
+                  {/* V9: Derived from PPE Section */}
+                  {(() => {
+                    const derivedItems = getDerivedCaItems();
+                    const finalItems = getFinalCaItems();
+                    const effectiveRates = getEffectiveCaRates();
                     
                     return (
-                      <div key={item.id} style={{ display: 'grid', gridTemplateColumns: '100px 180px 140px 90px 60px 60px 80px 30px', padding: '6px 10px', background: i % 2 ? 'transparent' : 'rgba(17,24,39,0.3)', borderRadius: 4, fontSize: 10, alignItems: 'center', gap: 8 }}>
-                        <input
-                          type="date"
-                          value={item.acquisitionDate}
-                          onChange={(e) => updateCAScheduleItem(item.id, 'acquisitionDate', e.target.value)}
-                          style={{ 
-                            padding: '4px', 
-                            background: 'rgba(17,24,39,0.5)', 
-                            border: '1px solid rgba(75,85,99,0.3)', 
-                            borderRadius: 4, 
-                            color: '#e5e7eb', 
-                            fontSize: 9
-                          }}
-                        />
-                        <input
-                          type="text"
-                          value={item.description}
-                          onChange={(e) => updateCAScheduleItem(item.id, 'description', e.target.value)}
-                          placeholder="Asset description..."
-                          style={{ 
-                            padding: '4px 8px', 
-                            background: 'rgba(17,24,39,0.5)', 
-                            border: '1px solid rgba(75,85,99,0.3)', 
-                            borderRadius: 4, 
-                            color: '#e5e7eb', 
-                            fontSize: 10
-                          }}
-                        />
-                        <select
-                          value={item.category}
-                          onChange={(e) => updateCAScheduleItem(item.id, 'category', e.target.value)}
-                          style={{ 
-                            padding: '4px', 
-                            background: 'rgba(17,24,39,0.5)', 
-                            border: '1px solid rgba(75,85,99,0.3)', 
-                            borderRadius: 4, 
-                            color: '#e5e7eb', 
-                            fontSize: 9
-                          }}
-                        >
-                          {Object.entries(DEFAULT_CA_RATES).map(([key, val]) => (
-                            <option key={key} value={key}>{val.label}</option>
-                          ))}
-                        </select>
-                        <input
-                          type="number"
-                          value={item.cost || ''}
-                          onChange={(e) => updateCAScheduleItem(item.id, 'cost', parseFloat(e.target.value) || 0)}
-                          placeholder="0"
-                          style={{ 
-                            padding: '4px 8px', 
-                            background: 'rgba(17,24,39,0.5)', 
-                            border: '1px solid rgba(75,85,99,0.3)', 
-                            borderRadius: 4, 
-                            color: '#e5e7eb', 
-                            fontSize: 10,
-                            fontFamily: 'monospace',
-                            textAlign: 'right'
-                          }}
-                        />
-                        <span style={{ textAlign: 'center', fontFamily: 'monospace', color: calc.isCurrentYear ? '#34d399' : '#6b7280', fontSize: 9 }}>
-                          {calc.isCurrentYear ? rates.ia : '-'}
-                        </span>
-                        <span style={{ textAlign: 'center', fontFamily: 'monospace', color: '#34d399', fontSize: 9 }}>
-                          {rates.aa}
-                        </span>
-                        <span style={{ textAlign: 'right', fontFamily: 'monospace', color: '#34d399', fontWeight: 600 }}>
-                          {fmt(calc.totalCA)}
-                        </span>
+                      <>
+                        {/* Warning if using default rates */}
+                        {isUsingDefaultCaRates() && (
+                          <div style={{ padding: '8px 12px', background: 'rgba(251,191,36,0.1)', border: '1px solid rgba(251,191,36,0.3)', borderRadius: 6, marginBottom: 12, fontSize: 10, color: '#fbbf24' }}>
+                            ⚠️ Using default CA rates – you can customize rates in Settings if needed
+                          </div>
+                        )}
+                        
+                        {/* Header Row */}
+                        <div style={{ display: 'grid', gridTemplateColumns: '60px 100px 180px 130px 90px 55px 55px 80px 30px', padding: '8px 10px', background: 'rgba(99,102,241,0.1)', borderRadius: 4, fontSize: 9, fontWeight: 600, color: '#9ca3af', marginBottom: 4, gap: 6 }}>
+                          <span>Source</span>
+                          <span>Acquisition Date</span>
+                          <span>Asset Description</span>
+                          <span>Category</span>
+                          <span style={{ textAlign: 'right' }}>Cost (RM)</span>
+                          <span style={{ textAlign: 'center' }}>IA %</span>
+                          <span style={{ textAlign: 'center' }}>AA %</span>
+                          <span style={{ textAlign: 'right' }}>CA Amount</span>
+                          <span></span>
+                        </div>
+                        
+                        {/* V9: Display all final items (derived + manual) */}
+                        {finalItems.length === 0 ? (
+                          <div style={{ padding: 20, textAlign: 'center', color: '#6b7280', fontSize: 11 }}>
+                            No CA items. Enable "CA?" toggle on PPE assets or add manual entries below.
+                          </div>
+                        ) : (
+                          finalItems.map((item, i) => {
+                            const calc = calculateItemCA(item);
+                            const rates = effectiveRates[item.category] || effectiveRates['OFFICE_EQUIPMENT'] || DEFAULT_CA_RATES['OFFICE_EQUIPMENT'];
+                            const isDerived = item.sourceType === 'PPE';
+                            const isOverride = item.isOverride;
+                            
+                            return (
+                              <div key={item.id} style={{ 
+                                display: 'grid', 
+                                gridTemplateColumns: '60px 100px 180px 130px 90px 55px 55px 80px 30px', 
+                                padding: '6px 10px', 
+                                background: isDerived 
+                                  ? (i % 2 ? 'rgba(52,211,153,0.05)' : 'rgba(52,211,153,0.1)') 
+                                  : (i % 2 ? 'transparent' : 'rgba(17,24,39,0.3)'), 
+                                borderRadius: 4, 
+                                fontSize: 10, 
+                                alignItems: 'center', 
+                                gap: 6,
+                                border: isOverride ? '1px solid rgba(251,191,36,0.3)' : 'none'
+                              }}>
+                                {/* Source indicator */}
+                                <span style={{ 
+                                  fontSize: 8, 
+                                  padding: '2px 6px', 
+                                  borderRadius: 3, 
+                                  background: isDerived ? 'rgba(52,211,153,0.2)' : 'rgba(99,102,241,0.2)',
+                                  color: isDerived ? '#34d399' : '#a5b4fc'
+                                }}>
+                                  {isDerived ? '🏭 PPE' : '✏️ Manual'}
+                                </span>
+                                
+                                {/* Acquisition Date - editable only for manual items */}
+                                {isDerived && !isOverride ? (
+                                  <span style={{ fontSize: 9, color: '#9ca3af' }}>{item.acquisitionDate || '-'}</span>
+                                ) : (
+                                  <input
+                                    type="date"
+                                    value={item.acquisitionDate || ''}
+                                    onChange={(e) => updateCAScheduleItem(item.id, 'acquisitionDate', e.target.value)}
+                                    style={{ 
+                                      padding: '4px', 
+                                      background: 'rgba(17,24,39,0.5)', 
+                                      border: '1px solid rgba(75,85,99,0.3)', 
+                                      borderRadius: 4, 
+                                      color: '#e5e7eb', 
+                                      fontSize: 9
+                                    }}
+                                  />
+                                )}
+                                
+                                {/* Description */}
+                                {isDerived && !isOverride ? (
+                                  <span style={{ fontSize: 10, color: '#e5e7eb' }} title={item.assetId}>{item.description || '-'}</span>
+                                ) : (
+                                  <input
+                                    type="text"
+                                    value={item.description || ''}
+                                    onChange={(e) => updateCAScheduleItem(item.id, 'description', e.target.value)}
+                                    placeholder="Asset description..."
+                                    style={{ 
+                                      padding: '4px 8px', 
+                                      background: 'rgba(17,24,39,0.5)', 
+                                      border: '1px solid rgba(75,85,99,0.3)', 
+                                      borderRadius: 4, 
+                                      color: '#e5e7eb', 
+                                      fontSize: 10
+                                    }}
+                                  />
+                                )}
+                                
+                                {/* Category */}
+                                {isDerived && !isOverride ? (
+                                  <span style={{ fontSize: 9, color: '#9ca3af' }}>{rates.label || item.category}</span>
+                                ) : (
+                                  <select
+                                    value={item.category}
+                                    onChange={(e) => updateCAScheduleItem(item.id, 'category', e.target.value)}
+                                    style={{ 
+                                      padding: '4px', 
+                                      background: 'rgba(17,24,39,0.5)', 
+                                      border: '1px solid rgba(75,85,99,0.3)', 
+                                      borderRadius: 4, 
+                                      color: '#e5e7eb', 
+                                      fontSize: 9
+                                    }}
+                                  >
+                                    {Object.entries(DEFAULT_CA_RATES).map(([key, val]) => (
+                                      <option key={key} value={key}>{val.label}</option>
+                                    ))}
+                                  </select>
+                                )}
+                                
+                                {/* Cost */}
+                                {isDerived && !isOverride ? (
+                                  <span style={{ textAlign: 'right', fontFamily: 'monospace', color: '#e5e7eb' }}>{fmt(item.cost)}</span>
+                                ) : (
+                                  <input
+                                    type="number"
+                                    value={item.cost || ''}
+                                    onChange={(e) => updateCAScheduleItem(item.id, 'cost', parseFloat(e.target.value) || 0)}
+                                    placeholder="0"
+                                    style={{ 
+                                      padding: '4px 8px', 
+                                      background: 'rgba(17,24,39,0.5)', 
+                                      border: '1px solid rgba(75,85,99,0.3)', 
+                                      borderRadius: 4, 
+                                      color: '#e5e7eb', 
+                                      fontSize: 10,
+                                      fontFamily: 'monospace',
+                                      textAlign: 'right'
+                                    }}
+                                  />
+                                )}
+                                
+                                {/* IA % */}
+                                <span style={{ textAlign: 'center', fontFamily: 'monospace', color: calc.isCurrentYear ? '#34d399' : '#6b7280', fontSize: 9 }}>
+                                  {calc.isCurrentYear ? rates.ia : '-'}
+                                </span>
+                                
+                                {/* AA % */}
+                                <span style={{ textAlign: 'center', fontFamily: 'monospace', color: '#34d399', fontSize: 9 }}>
+                                  {rates.aa}
+                                </span>
+                                
+                                {/* CA Amount */}
+                                <span style={{ textAlign: 'right', fontFamily: 'monospace', color: '#34d399', fontWeight: 600 }}>
+                                  {fmt(calc.totalCA)}
+                                </span>
+                                
+                                {/* Delete button - only for manual items */}
+                                {!isDerived || isOverride ? (
+                                  <button
+                                    onClick={() => removeCAScheduleItem(item.id)}
+                                    style={{ 
+                                      padding: '2px 6px', 
+                                      background: 'rgba(248,113,113,0.2)', 
+                                      border: 'none', 
+                                      borderRadius: 4, 
+                                      color: '#f87171', 
+                                      fontSize: 12, 
+                                      cursor: 'pointer' 
+                                    }}
+                                    title={isOverride ? 'Remove override (will revert to PPE values)' : 'Delete manual entry'}
+                                  >
+                                    ×
+                                  </button>
+                                ) : (
+                                  <span style={{ fontSize: 8, color: '#6b7280' }} title="Edit in PPE Register">🔒</span>
+                                )}
+                              </div>
+                            );
+                          })
+                        )}
+                        
+                        {/* Add Manual Row Button */}
                         <button
-                          onClick={() => removeCAScheduleItem(item.id)}
+                          onClick={addCAScheduleItem}
                           style={{ 
-                            padding: '2px 6px', 
-                            background: 'rgba(248,113,113,0.2)', 
-                            border: 'none', 
+                            width: '100%', 
+                            padding: '8px', 
+                            marginTop: 8,
+                            background: 'rgba(99,102,241,0.1)', 
+                            border: '1px dashed rgba(99,102,241,0.5)', 
                             borderRadius: 4, 
-                            color: '#f87171', 
-                            fontSize: 12, 
-                            cursor: 'pointer' 
+                            color: '#a5b4fc', 
+                            fontSize: 11, 
+                            cursor: 'pointer',
+                            display: 'flex',
+                            alignItems: 'center',
+                            justifyContent: 'center',
+                            gap: 8
                           }}
                         >
-                          ×
+                          <span style={{ fontSize: 14 }}>+</span> Add Manual CA Entry (not linked to PPE)
                         </button>
-                      </div>
+                        
+                        {/* Totals Row */}
+                        {finalItems.length > 0 && (
+                          <div style={{ display: 'grid', gridTemplateColumns: '60px 100px 180px 130px 90px 55px 55px 80px 30px', padding: '10px', background: 'rgba(52,211,153,0.1)', borderRadius: 4, fontSize: 11, fontWeight: 600, marginTop: 8, borderTop: '2px solid rgba(75,85,99,0.3)', gap: 6 }}>
+                            <span></span>
+                            <span style={{ gridColumn: 'span 2' }}>
+                              TOTAL ({finalItems.length} items: {derivedItems.length} from PPE, {caScheduleItems.filter(i => !i.assetId).length} manual)
+                            </span>
+                            <span></span>
+                            <span style={{ textAlign: 'right', fontFamily: 'monospace' }}>{fmt(getTotalCAScheduleCost())}</span>
+                            <span></span>
+                            <span></span>
+                            <span style={{ textAlign: 'right', fontFamily: 'monospace', color: '#34d399' }}>{fmt(computeTotalCapitalAllowance())}</span>
+                            <span></span>
+                          </div>
+                        )}
+                        
+                        {/* CA Breakdown */}
+                        {finalItems.length > 0 && (
+                          <div style={{ marginTop: 12, padding: 12, background: 'rgba(17,24,39,0.3)', borderRadius: 8, fontSize: 10 }}>
+                            <div style={{ fontWeight: 600, color: '#a5b4fc', marginBottom: 8 }}>📊 CA Breakdown for YA {currentYear}</div>
+                            <div style={{ display: 'grid', gridTemplateColumns: 'repeat(3, 1fr)', gap: 12 }}>
+                              <div style={{ padding: 10, background: 'rgba(52,211,153,0.1)', borderRadius: 6, borderLeft: '3px solid #34d399' }}>
+                                <div style={{ fontSize: 9, color: '#9ca3af' }}>Initial Allowance (New Assets)</div>
+                                <div style={{ fontSize: 14, fontWeight: 700, color: '#34d399', fontFamily: 'monospace' }}>
+                                  RM {fmt(finalItems.reduce((sum, item) => sum + calculateItemCA(item).ia, 0))}
+                                </div>
+                                <div style={{ fontSize: 8, color: '#6b7280', marginTop: 2 }}>
+                                  {finalItems.filter(item => calculateItemCA(item).isCurrentYear).length} assets acquired in {currentYear}
+                                </div>
+                              </div>
+                              <div style={{ padding: 10, background: 'rgba(96,165,250,0.1)', borderRadius: 6, borderLeft: '3px solid #60a5fa' }}>
+                                <div style={{ fontSize: 9, color: '#9ca3af' }}>Annual Allowance (All Assets)</div>
+                                <div style={{ fontSize: 14, fontWeight: 700, color: '#60a5fa', fontFamily: 'monospace' }}>
+                                  RM {fmt(finalItems.reduce((sum, item) => sum + calculateItemCA(item).aa, 0))}
+                                </div>
+                                <div style={{ fontSize: 8, color: '#6b7280', marginTop: 2 }}>
+                                  {finalItems.length} qualifying assets
+                                </div>
+                              </div>
+                              <div style={{ padding: 10, background: 'rgba(167,139,250,0.1)', borderRadius: 6, borderLeft: '3px solid #a78bfa' }}>
+                                <div style={{ fontSize: 9, color: '#9ca3af' }}>Total CA Claimed</div>
+                                <div style={{ fontSize: 14, fontWeight: 700, color: '#a78bfa', fontFamily: 'monospace' }}>
+                                  RM {fmt(computeTotalCapitalAllowance())}
+                                </div>
+                                <div style={{ fontSize: 8, color: '#6b7280', marginTop: 2 }}>
+                                  IA + AA for YA {currentYear}
+                                </div>
+                              </div>
+                            </div>
+                          </div>
+                        )}
+                      </>
                     );
-                  })}
-                  
-                  {/* Add Row Button */}
-                  <button
-                    onClick={addCAScheduleItem}
-                    style={{ 
-                      width: '100%', 
-                      padding: '8px', 
-                      marginTop: 8,
-                      background: 'rgba(52,211,153,0.1)', 
-                      border: '1px dashed rgba(52,211,153,0.5)', 
-                      borderRadius: 4, 
-                      color: '#34d399', 
-                      fontSize: 11, 
-                      cursor: 'pointer',
-                      display: 'flex',
-                      alignItems: 'center',
-                      justifyContent: 'center',
-                      gap: 8
-                    }}
-                  >
-                    <span style={{ fontSize: 14 }}>+</span> Add Asset
-                  </button>
-                  
-                  {/* Totals Row */}
-                  {caScheduleItems.length > 0 && (
-                    <div style={{ display: 'grid', gridTemplateColumns: '100px 180px 140px 90px 60px 60px 80px 30px', padding: '10px', background: 'rgba(52,211,153,0.1)', borderRadius: 4, fontSize: 11, fontWeight: 600, marginTop: 8, borderTop: '2px solid rgba(75,85,99,0.3)', gap: 8 }}>
-                      <span style={{ gridColumn: 'span 3' }}>TOTAL ({caScheduleItems.length} assets)</span>
-                      <span style={{ textAlign: 'right', fontFamily: 'monospace' }}>{fmt(getTotalCAScheduleCost())}</span>
-                      <span></span>
-                      <span></span>
-                      <span style={{ textAlign: 'right', fontFamily: 'monospace', color: '#34d399' }}>{fmt(computeTotalCapitalAllowance())}</span>
-                      <span></span>
-                    </div>
-                  )}
-                  
-                  {/* CA Breakdown */}
-                  {caScheduleItems.length > 0 && (
-                    <div style={{ marginTop: 12, padding: 12, background: 'rgba(17,24,39,0.3)', borderRadius: 8, fontSize: 10 }}>
-                      <div style={{ fontWeight: 600, color: '#a5b4fc', marginBottom: 8 }}>📊 CA Breakdown for YA {currentYear}</div>
-                      <div style={{ display: 'grid', gridTemplateColumns: 'repeat(3, 1fr)', gap: 12 }}>
-                        <div style={{ padding: 10, background: 'rgba(52,211,153,0.1)', borderRadius: 6, borderLeft: '3px solid #34d399' }}>
-                          <div style={{ fontSize: 9, color: '#9ca3af' }}>Initial Allowance (New Assets)</div>
-                          <div style={{ fontSize: 14, fontWeight: 700, color: '#34d399', fontFamily: 'monospace' }}>
-                            RM {fmt(caScheduleItems.reduce((sum, item) => sum + calculateItemCA(item).ia, 0))}
-                          </div>
-                          <div style={{ fontSize: 8, color: '#6b7280', marginTop: 2 }}>
-                            {caScheduleItems.filter(item => calculateItemCA(item).isCurrentYear).length} assets acquired in {currentYear}
-                          </div>
-                        </div>
-                        <div style={{ padding: 10, background: 'rgba(96,165,250,0.1)', borderRadius: 6, borderLeft: '3px solid #60a5fa' }}>
-                          <div style={{ fontSize: 9, color: '#9ca3af' }}>Annual Allowance (All Assets)</div>
-                          <div style={{ fontSize: 14, fontWeight: 700, color: '#60a5fa', fontFamily: 'monospace' }}>
-                            RM {fmt(caScheduleItems.reduce((sum, item) => sum + calculateItemCA(item).aa, 0))}
-                          </div>
-                          <div style={{ fontSize: 8, color: '#6b7280', marginTop: 2 }}>
-                            {caScheduleItems.length} qualifying assets
-                          </div>
-                        </div>
-                        <div style={{ padding: 10, background: 'rgba(167,139,250,0.1)', borderRadius: 6, borderLeft: '3px solid #a78bfa' }}>
-                          <div style={{ fontSize: 9, color: '#9ca3af' }}>Total CA Claimed</div>
-                          <div style={{ fontSize: 14, fontWeight: 700, color: '#a78bfa', fontFamily: 'monospace' }}>
-                            RM {fmt(computeTotalCapitalAllowance())}
-                          </div>
-                          <div style={{ fontSize: 8, color: '#6b7280', marginTop: 2 }}>
-                            IA + AA for YA {currentYear}
-                          </div>
-                        </div>
-                      </div>
-                    </div>
-                  )}
+                  })()}
                   
                   {/* Info */}
                   <div style={{ marginTop: 12, padding: 12, background: 'rgba(99,102,241,0.1)', borderRadius: 8, fontSize: 10, color: '#9ca3af' }}>
@@ -12633,8 +13151,9 @@ ${res.bs.borr > 0 ? `<h3>10. ${isEN ? 'BORROWINGS' : 'PINJAMAN'}</h3>
                       <div><span style={{ color: '#6b7280' }}>Heavy Machinery:</span> IA 20%, AA 10%</div>
                     </div>
                     <div style={{ marginTop: 8, fontSize: 9, color: '#6b7280', borderTop: '1px solid rgba(75,85,99,0.2)', paddingTop: 8 }}>
-                      <strong>Note:</strong> IA (Initial Allowance) is claimed in the year of acquisition only. AA (Annual Allowance) is claimed every year until the qualifying expenditure is fully absorbed. 
-                      The total cost in CA Schedule should match PPE Subledger for reconciliation.
+                      <strong>V9 Note:</strong> Assets with "CA?" toggle ON in PPE Register automatically appear here. 
+                      Manual entries can be added for assets not in PPE (e.g., prior year assets). 
+                      IA (Initial Allowance) is claimed in the year of acquisition only. AA (Annual Allowance) is claimed every year until the qualifying expenditure is fully absorbed.
                     </div>
                   </div>
                 </div>
