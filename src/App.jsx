@@ -849,14 +849,20 @@ const FSEngine = {
         bs.tp = subledgerData.payables;
       }
       
-      // Other Receivables (Debtors) from subledger - accruals/prepayments usually from subledger
+      // Other Receivables (Debtors) from subledger.
+      // These items SUPPLEMENT the TB value (which holds the OB opening balance from
+      // prior year deposits/prepayments/advances). The subledger lists NEW items added
+      // during the year. We ADD to bs.or rather than replacing it, so the OB value is
+      // preserved alongside any new year-end items the user has recorded.
+      // Note: if the user wants the subledger to BE the full year-end balance (replacing OB),
+      // they should clear the ob.other_receivables entry from Opening Balances.
       if (subledgerData.otherDebtors > 0) {
-        bs.or = subledgerData.otherDebtors;
+        bs.or = (bs.or || 0) + subledgerData.otherDebtors;
       }
-      
-      // Other Payables (Creditors) from subledger - accruals usually from subledger
+
+      // Other Payables (Creditors) from subledger - same additive logic
       if (subledgerData.otherCreditors > 0) {
-        bs.op = subledgerData.otherCreditors;
+        bs.op = (bs.op || 0) + subledgerData.otherCreditors;
       }
       
       // Short-Term Borrowings from subledger - OVERRIDE TB value if subledger has data
@@ -12728,7 +12734,10 @@ ${res.bs.borr > 0 ? `<h3>${noteN.borrowings}. ${isEN ? 'BORROWINGS' : 'PINJAMAN'
               {/* Trade Receivables */}
               <div style={{ background: 'rgba(31,41,55,0.6)', borderRadius: 10, border: '1px solid rgba(75,85,99,0.3)', overflow: 'hidden' }}>
                 <div style={{ padding: '10px 16px', borderBottom: '1px solid rgba(75,85,99,0.2)', display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
-                  <span style={{ fontWeight: 700, fontSize: 13 }}>👥 Trade Receivables (Debtors)</span>
+                  <div>
+                    <span style={{ fontWeight: 700, fontSize: 13 }}>👥 Trade Receivables (Debtors)</span>
+                    <span style={{ fontSize: 9, color: '#6b7280', marginLeft: 6 }}>→ BS: Trade Receivables</span>
+                  </div>
                   <button onClick={addReceivable} style={{ padding: '4px 10px', background: 'rgba(251,191,36,0.2)', border: 'none', borderRadius: 4, color: '#fbbf24', fontSize: 10, cursor: 'pointer' }}>+ Add Customer</button>
                 </div>
                 <div style={{ padding: 12, maxHeight: 280, overflowY: 'auto' }}>
@@ -12809,7 +12818,10 @@ ${res.bs.borr > 0 ? `<h3>${noteN.borrowings}. ${isEN ? 'BORROWINGS' : 'PINJAMAN'
               {/* Other Debtors */}
               <div style={{ background: 'rgba(31,41,55,0.6)', borderRadius: 10, border: '1px solid rgba(75,85,99,0.3)', overflow: 'hidden' }}>
                 <div style={{ padding: '10px 16px', borderBottom: '1px solid rgba(75,85,99,0.2)', display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
-                  <span style={{ fontWeight: 700, fontSize: 13 }}>📋 Other Debtors</span>
+                  <div>
+                    <span style={{ fontWeight: 700, fontSize: 13 }}>📋 Other Debtors</span>
+                    <span style={{ fontSize: 9, color: '#6b7280', marginLeft: 6 }}>→ BS: Other Receivables</span>
+                  </div>
                   <button onClick={addOtherDebtor} style={{ padding: '4px 10px', background: 'rgba(139,92,246,0.2)', border: 'none', borderRadius: 4, color: '#c084fc', fontSize: 10, cursor: 'pointer' }}>+ Add</button>
                 </div>
                 <div style={{ padding: 12, maxHeight: 250, overflowY: 'auto' }}>
