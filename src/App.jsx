@@ -839,30 +839,35 @@ const FSEngine = {
         bs.inv = subledgerData.inventory;
       }
       
-      // Trade Receivables from subledger - only override if TB only has opening balance
-      if (subledgerData.receivables > 0 && bs.tr === 0) {
+      // Trade Receivables from subledger.
+      // When the user has explicitly entered invoices in the Trade Receivables subledger
+      // (hasTradeReceivables flag), the subledger represents the authoritative YEAR-END
+      // outstanding balance and ALWAYS overrides the TB value.
+      // When no subledger entries, the TB value is used (OB + RECEIPT_DEBTOR collections).
+      if (subledgerData.hasTradeReceivables) {
         bs.tr = subledgerData.receivables;
       }
-      
-      // Trade Payables from subledger - only override if TB only has opening balance
-      if (subledgerData.payables > 0 && bs.tp === 0) {
+
+      // Trade Payables from subledger — same logic as Trade Receivables above.
+      if (subledgerData.hasTradePayables) {
         bs.tp = subledgerData.payables;
       }
       
       // Other Receivables (Debtors) from subledger.
-      // These items SUPPLEMENT the TB value (which holds the OB opening balance from
-      // prior year deposits/prepayments/advances). The subledger lists NEW items added
-      // during the year. We ADD to bs.or rather than replacing it, so the OB value is
-      // preserved alongside any new year-end items the user has recorded.
-      // Note: if the user wants the subledger to BE the full year-end balance (replacing OB),
-      // they should clear the ob.other_receivables entry from Opening Balances.
+      // The subledger represents the FULL YEAR-END balance of Other Receivables
+      // (deposits paid, prepayments, staff advances outstanding at year end).
+      // When populated, it REPLACES the TB value — same design as closing inventory.
+      // If no subledger entries, the TB value is used (OB carried forward).
+      // Users should enter ALL outstanding other debtors at year-end in the subledger,
+      // including amounts carried forward from the opening balance.
       if (subledgerData.otherDebtors > 0) {
-        bs.or = (bs.or || 0) + subledgerData.otherDebtors;
+        bs.or = subledgerData.otherDebtors;
       }
 
-      // Other Payables (Creditors) from subledger - same additive logic
+      // Other Payables (Creditors) from subledger — same replacement logic.
+      // The subledger = full year-end balance of accruals, deposits received, etc.
       if (subledgerData.otherCreditors > 0) {
-        bs.op = (bs.op || 0) + subledgerData.otherCreditors;
+        bs.op = subledgerData.otherCreditors;
       }
       
       // Short-Term Borrowings from subledger - OVERRIDE TB value if subledger has data
@@ -3289,7 +3294,9 @@ export default function App() {
       ppe: ppeTotal,
       inventory: invTotal,
       receivables: arTotal,
+      hasTradeReceivables: tradeReceivables.length > 0,   // flag: user explicitly entered AR subledger
       payables: apTotal,
+      hasTradePayables: tradePayables.length > 0,          // flag: user explicitly entered AP subledger
       otherDebtors: odTotal,
       otherCreditors: ocTotal,
       cashBank: cashTotal,
@@ -4605,7 +4612,9 @@ export default function App() {
         ppe: subledgerTotals.ppe,
         inventory: subledgerTotals.inventory,
         receivables: subledgerTotals.receivables,
+        hasTradeReceivables: subledgerTotals.hasTradeReceivables,
         payables: subledgerTotals.payables,
+        hasTradePayables: subledgerTotals.hasTradePayables,
         otherDebtors: subledgerTotals.otherDebtors,
         otherCreditors: subledgerTotals.otherCreditors,
         cashBank: subledgerTotals.cashBank,
@@ -12737,6 +12746,7 @@ ${res.bs.borr > 0 ? `<h3>${noteN.borrowings}. ${isEN ? 'BORROWINGS' : 'PINJAMAN'
                   <div>
                     <span style={{ fontWeight: 700, fontSize: 13 }}>👥 Trade Receivables (Debtors)</span>
                     <span style={{ fontSize: 9, color: '#6b7280', marginLeft: 6 }}>→ BS: Trade Receivables</span>
+                    <div style={{ fontSize: 8, color: '#6b7280', marginTop: 1 }}>Enter outstanding customer invoices at year-end. Overrides TB if populated.</div>
                   </div>
                   <button onClick={addReceivable} style={{ padding: '4px 10px', background: 'rgba(251,191,36,0.2)', border: 'none', borderRadius: 4, color: '#fbbf24', fontSize: 10, cursor: 'pointer' }}>+ Add Customer</button>
                 </div>
