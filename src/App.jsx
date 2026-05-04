@@ -831,11 +831,11 @@ const FSEngine = {
         }
       }
       
-      // Inventory: subledger closing value ALWAYS overrides BS inventory.
-      // The TB inventory account only holds the opening balance (from OB) since no
-      // bank transactions touch the inventory account directly. The subledger is the
-      // authoritative source for the closing/year-end inventory value.
-      if (subledgerData.inventory >= 0) {
+      // Inventory: subledger closing value overrides BS when explicitly provided.
+      // -1 is the sentinel meaning "user left blank — don't override".
+      // When blank, bs.inv keeps the TB value (opening balance from OB),
+      // which is correct when no stock movement is being tracked.
+      if ('inventory' in subledgerData && subledgerData.inventory !== -1 && subledgerData.inventory >= 0) {
         bs.inv = subledgerData.inventory;
       }
       
@@ -909,19 +909,22 @@ const FSEngine = {
     
     // ── Inventory movement adjustment ───────────────────────────────────
     // COGS = Opening Stock + Purchases + Freight + Direct Costs − Closing Stock
-    // Without this, is.cos only reflects goods *purchased*, not goods *sold*.
-    // Opening stock: from the TB inventory account opening balance (set via OB tab)
-    // Closing stock: from subledger (user-entered simple value or SKU total)
+    // Only fires when user has EXPLICITLY provided a closing stock value.
+    // -1 sentinel means "not provided" — skip adjustment to avoid inflating COGS
+    // when the closing inventory field is blank (which used to pass 0, wiping
+    // out the opening stock balance and adding 19k phantom expense).
     const tbInvRow = tb.find(r => r.acc === 'inventory');
     const openingStock = tbInvRow ? (tbInvRow.op || 0) : 0;
-    const closingStock = subledgerData?.inventory ?? 0;
-    if (openingStock > 0 || closingStock > 0) {
+    // Only adjust when closing stock was explicitly entered (not -1 sentinel)
+    const closingStockProvided = subledgerData && 'inventory' in subledgerData && subledgerData.inventory !== -1;
+    const closingStock = closingStockProvided ? (subledgerData.inventory || 0) : null;
+    if (closingStockProvided && (openingStock > 0 || closingStock > 0)) {
       // Store for P&L disclosure
       is.details['OPENING_STOCK'] = openingStock;
       is.details['CLOSING_STOCK'] = closingStock;
       // Adjust COGS: add opening, subtract closing
       is.cos = is.cos + openingStock - closingStock;
-      if (is.cos < 0) is.cos = 0; // guard — shouldn't be negative
+      if (is.cos < 0) is.cos = 0; // guard
     }
 
     // Income Statement calculations
@@ -3149,10 +3152,18 @@ export default function App() {
       const unitCost = parseFloat(item.unitCost) || 0;
       return acc + (qty * unitCost);
     }, 0);
+    // BUG FIX: Only use closing inventory when user EXPLICITLY entered a value.
+    // If blank ('') → NaN → don't override OB inventory and don't adjust COGS.
+    // Passing 0 to genFS (when blank) was wiping out the opening stock AND
+    // inflating COGS by the opening stock amount, causing a RM19k BS imbalance.
     const closingInventoryVal = parseFloat(closingInventory);
-    const invTotal = !isNaN(closingInventoryVal) && closingInventoryVal >= 0
-      ? closingInventoryVal   // simple mode takes priority
-      : skuTotal;             // fall back to SKU detail if entered
+    const hasExplicitClosingInventory = !isNaN(closingInventoryVal) && closingInventory !== '';
+    // -1 is the sentinel meaning "not provided — don't override or adjust"
+    const invTotal = hasExplicitClosingInventory
+      ? closingInventoryVal   // user entered a value → use it
+      : skuTotal > 0
+        ? skuTotal            // SKU detail entered → use that
+        : -1;                 // nothing entered → sentinel, genFS will skip override
     
     // Trade Receivables
     const arTotal = tradeReceivables.reduce((acc, item) => {
