@@ -13452,6 +13452,32 @@ ${res.bs.borr > 0 ? `<h3>${noteN.borrowings}. ${isEN ? 'BORROWINGS' : 'PINJAMAN'
                   <span style={{ textAlign: 'right', fontSize: 8, fontWeight: 600, color: r.cl >= 0 ? '#a5b4fc' : '#f9a8d4' }}>{r.cl >= 0 ? 'DR' : 'CR'}</span>
                 </div>
               ))}
+              {/* TB Totals Row */}
+              {(() => {
+                const totalOp  = res.tb.reduce((s, r) => s + (r.op || 0), 0);
+                const totalDr  = res.tb.reduce((s, r) => s + (r.dr || 0), 0);
+                const totalCr  = res.tb.reduce((s, r) => s + (r.cr || 0), 0);
+                const totalCl  = res.tb.reduce((s, r) => s + (r.cl || 0), 0);
+                const balanced = Math.abs(totalCl) < 0.01;
+                return (
+                  <>
+                    <div style={{ height: 1, background: 'rgba(99,102,241,0.4)', margin: '6px 0' }} />
+                    <div style={{ display: 'grid', gridTemplateColumns: '140px repeat(5, 1fr)', padding: '6px 10px', background: balanced ? 'rgba(52,211,153,0.08)' : 'rgba(248,113,113,0.08)', borderRadius: 4, fontSize: 10, fontWeight: 700 }}>
+                      <span style={{ color: balanced ? '#34d399' : '#f87171' }}>TOTAL {balanced ? '✓' : '⚠'}</span>
+                      <span style={{ textAlign: 'right', fontFamily: 'monospace', color: '#9ca3af' }}>{fmt(totalOp)}</span>
+                      <span style={{ textAlign: 'right', fontFamily: 'monospace', color: '#a5b4fc' }}>{fmt(totalDr)}</span>
+                      <span style={{ textAlign: 'right', fontFamily: 'monospace', color: '#a5b4fc' }}>{fmt(totalCr)}</span>
+                      <span style={{ textAlign: 'right', fontFamily: 'monospace', color: balanced ? '#34d399' : '#f87171' }}>{fmt(Math.abs(totalCl))}</span>
+                      <span style={{ textAlign: 'right', fontSize: 8, fontWeight: 600, color: balanced ? '#34d399' : '#f87171' }}>{balanced ? 'BALANCED' : totalCl >= 0 ? 'DR' : 'CR'}</span>
+                    </div>
+                    {!balanced && (
+                      <div style={{ margin: '6px 10px 2px', fontSize: 9, color: '#f87171', background: 'rgba(248,113,113,0.08)', border: '1px solid rgba(248,113,113,0.2)', borderRadius: 4, padding: '4px 8px' }}>
+                        TB out of balance by {fmt(Math.abs(totalCl))} — check for unbalanced opening balances or journal entries
+                      </div>
+                    )}
+                  </>
+                );
+              })()}
             </div>
           </div>
         )}
