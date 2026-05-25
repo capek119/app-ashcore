@@ -831,41 +831,28 @@ const FSEngine = {
         }
       }
       
-      // Inventory: subledger closing value overrides BS when explicitly provided.
-      // -1 is the sentinel meaning "user left blank — don't override".
-      // When blank, bs.inv keeps the TB value (opening balance from OB),
-      // which is correct when no stock movement is being tracked.
-      if ('inventory' in subledgerData && subledgerData.inventory !== -1 && subledgerData.inventory >= 0) {
+      // Inventory from subledger - only override if TB has no inventory from transactions
+      // (Opening inventory is in TB, subledger closing should reconcile)
+      if (subledgerData.inventory > 0 && bs.inv === 0) {
         bs.inv = subledgerData.inventory;
       }
       
-      // Trade Receivables from subledger.
-      // When the user has explicitly entered invoices in the Trade Receivables subledger
-      // (hasTradeReceivables flag), the subledger represents the authoritative YEAR-END
-      // outstanding balance and ALWAYS overrides the TB value.
-      // When no subledger entries, the TB value is used (OB + RECEIPT_DEBTOR collections).
-      if (subledgerData.hasTradeReceivables) {
+      // Trade Receivables from subledger - only override if TB only has opening balance
+      if (subledgerData.receivables > 0 && bs.tr === 0) {
         bs.tr = subledgerData.receivables;
       }
-
-      // Trade Payables from subledger — same logic as Trade Receivables above.
-      if (subledgerData.hasTradePayables) {
+      
+      // Trade Payables from subledger - only override if TB only has opening balance
+      if (subledgerData.payables > 0 && bs.tp === 0) {
         bs.tp = subledgerData.payables;
       }
       
-      // Other Receivables (Debtors) from subledger.
-      // The subledger represents the FULL YEAR-END balance of Other Receivables
-      // (deposits paid, prepayments, staff advances outstanding at year end).
-      // When populated, it REPLACES the TB value — same design as closing inventory.
-      // If no subledger entries, the TB value is used (OB carried forward).
-      // Users should enter ALL outstanding other debtors at year-end in the subledger,
-      // including amounts carried forward from the opening balance.
+      // Other Receivables (Debtors) from subledger - accruals/prepayments usually from subledger
       if (subledgerData.otherDebtors > 0) {
         bs.or = subledgerData.otherDebtors;
       }
-
-      // Other Payables (Creditors) from subledger — same replacement logic.
-      // The subledger = full year-end balance of accruals, deposits received, etc.
+      
+      // Other Payables (Creditors) from subledger - accruals usually from subledger
       if (subledgerData.otherCreditors > 0) {
         bs.op = subledgerData.otherCreditors;
       }
@@ -907,28 +894,8 @@ const FSEngine = {
     // Calculate PPE NBV
     bs.ppe = bs.ppe_cost - bs.ppe_accDep;
     
-    // ── Inventory movement adjustment ───────────────────────────────────
-    // COGS = Opening Stock + Purchases + Freight + Direct Costs − Closing Stock
-    // Only fires when user has EXPLICITLY provided a closing stock value.
-    // -1 sentinel means "not provided" — skip adjustment to avoid inflating COGS
-    // when the closing inventory field is blank (which used to pass 0, wiping
-    // out the opening stock balance and adding 19k phantom expense).
-    const tbInvRow = tb.find(r => r.acc === 'inventory');
-    const openingStock = tbInvRow ? (tbInvRow.op || 0) : 0;
-    // Only adjust when closing stock was explicitly entered (not -1 sentinel)
-    const closingStockProvided = subledgerData && 'inventory' in subledgerData && subledgerData.inventory !== -1;
-    const closingStock = closingStockProvided ? (subledgerData.inventory || 0) : null;
-    if (closingStockProvided && (openingStock > 0 || closingStock > 0)) {
-      // Store for P&L disclosure
-      is.details['OPENING_STOCK'] = openingStock;
-      is.details['CLOSING_STOCK'] = closingStock;
-      // Adjust COGS: add opening, subtract closing
-      is.cos = is.cos + openingStock - closingStock;
-      if (is.cos < 0) is.cos = 0; // guard
-    }
-
     // Income Statement calculations
-    is.gp = is.rev - is.cos;
+    is.gp = is.rev - is.cos; 
     is.op = is.gp - is.adm; 
     is.pbt = is.op + is.oi - is.oe - is.fin; 
     // Calculate tax using provided calculator function
@@ -2529,12 +2496,8 @@ export default function App() {
     //   disposed, disposalDate, disposalProceeds,
     //   includeForCA, taxCategory, qualifyingCost }
   ]);
-  // Simple inventory mode: user enters closing inventory total directly.
-  // COGS = Opening Inventory (from OB) + Purchases − Closing Inventory (this value)
-  const [closingInventory, setClosingInventory] = useState('');
   const [inventoryLedger, setInventoryLedger] = useState([
-    // Optional SKU detail: { id, itemCode, description, qty, unitCost, totalCost, category }
-    // Used only when detailed breakdown is needed. closingInventory takes priority if set.
+    // { id, itemCode, description, qty, unitCost, totalCost, category }
   ]);
   const [tradeReceivables, setTradeReceivables] = useState([
     // { id, customerName, invoiceNo, invoiceDate, dueDate, amount, paid, balance }
@@ -2879,7 +2842,7 @@ export default function App() {
   // Derive CA items from PPE assets where includeForCA=true and not disposed
   const getDerivedCaItems = () => {
     return ppeRegister
-      .filter(asset => asset.includeForCA && !asset.disposed)
+      .filter(asset => asset.includeForCA !== false && !asset.disposed)
       .map(asset => ({
         id: `derived_${asset.id}`,
         assetId: asset.assetId,
@@ -3145,25 +3108,12 @@ export default function App() {
       };
     }, { cost: 0, accDepBF: 0, currentDep: 0, accDepCF: 0, nbv: 0 });
     
-    // Inventory closing value
-    // Priority: 1) closingInventory simple field  2) SKU detail sum  3) zero
-    const skuTotal = inventoryLedger.reduce((acc, item) => {
+    // Inventory
+    const invTotal = inventoryLedger.reduce((acc, item) => {
       const qty = parseFloat(item.qty) || 0;
       const unitCost = parseFloat(item.unitCost) || 0;
       return acc + (qty * unitCost);
     }, 0);
-    // BUG FIX: Only use closing inventory when user EXPLICITLY entered a value.
-    // If blank ('') → NaN → don't override OB inventory and don't adjust COGS.
-    // Passing 0 to genFS (when blank) was wiping out the opening stock AND
-    // inflating COGS by the opening stock amount, causing a RM19k BS imbalance.
-    const closingInventoryVal = parseFloat(closingInventory);
-    const hasExplicitClosingInventory = !isNaN(closingInventoryVal) && closingInventory !== '';
-    // -1 is the sentinel meaning "not provided — don't override or adjust"
-    const invTotal = hasExplicitClosingInventory
-      ? closingInventoryVal   // user entered a value → use it
-      : skuTotal > 0
-        ? skuTotal            // SKU detail entered → use that
-        : -1;                 // nothing entered → sentinel, genFS will skip override
     
     // Trade Receivables
     const arTotal = tradeReceivables.reduce((acc, item) => {
@@ -3305,9 +3255,7 @@ export default function App() {
       ppe: ppeTotal,
       inventory: invTotal,
       receivables: arTotal,
-      hasTradeReceivables: tradeReceivables.length > 0,   // flag: user explicitly entered AR subledger
       payables: apTotal,
-      hasTradePayables: tradePayables.length > 0,          // flag: user explicitly entered AP subledger
       otherDebtors: odTotal,
       otherCreditors: ocTotal,
       cashBank: cashTotal,
@@ -3326,7 +3274,7 @@ export default function App() {
       // MAA FIX-6: PPE disposal proceeds for CF Investing
       ppeDisposalProceeds: ppeDisposalProceeds,
     };
-  }, [ppeRegister, inventoryLedger, closingInventory, tradeReceivables, tradePayables, otherDebtors, otherCreditors, cashBankLedger, shortTermBorrowings, longTermBorrowings, banks, txs, cashTxs, ob, currentYear]);
+  }, [ppeRegister, inventoryLedger, tradeReceivables, tradePayables, otherDebtors, otherCreditors, cashBankLedger, shortTermBorrowings, longTermBorrowings, banks, txs, cashTxs, ob, currentYear]);
   
   // Add new line item
   // Add new line item with specific type
@@ -4623,9 +4571,7 @@ export default function App() {
         ppe: subledgerTotals.ppe,
         inventory: subledgerTotals.inventory,
         receivables: subledgerTotals.receivables,
-        hasTradeReceivables: subledgerTotals.hasTradeReceivables,
         payables: subledgerTotals.payables,
-        hasTradePayables: subledgerTotals.hasTradePayables,
         otherDebtors: subledgerTotals.otherDebtors,
         otherCreditors: subledgerTotals.otherCreditors,
         cashBank: subledgerTotals.cashBank,
@@ -12651,119 +12597,88 @@ ${res.bs.borr > 0 ? `<h3>${noteN.borrowings}. ${isEN ? 'BORROWINGS' : 'PINJAMAN'
               {/* Inventory Ledger */}
               <div style={{ background: 'rgba(31,41,55,0.6)', borderRadius: 10, border: '1px solid rgba(75,85,99,0.3)', overflow: 'hidden' }}>
                 <div style={{ padding: '10px 16px', borderBottom: '1px solid rgba(75,85,99,0.2)', display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
-                  <div>
-                    <span style={{ fontWeight: 700, fontSize: 13 }}>📦 Inventory</span>
-                    <span style={{ fontSize: 9, color: '#6b7280', marginLeft: 8 }}>COGS = Opening + Purchases − Closing</span>
-                  </div>
+                  <span style={{ fontWeight: 700, fontSize: 13 }}>📦 Inventory Ledger</span>
+                  <button onClick={addInventoryItem} style={{ padding: '4px 10px', background: 'rgba(52,211,153,0.2)', border: 'none', borderRadius: 4, color: '#34d399', fontSize: 10, cursor: 'pointer' }}>+ Add Item</button>
                 </div>
-                <div style={{ padding: 12 }}>
-
-                  {/* ── Simple mode: Opening + Closing values ── */}
-                  <div style={{ marginBottom: 12 }}>
-                    {/* Opening Inventory — read-only, from Opening Balances */}
-                    <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 10, marginBottom: 8 }}>
-                      <div>
-                        <div style={{ fontSize: 9, color: '#9ca3af', marginBottom: 3, textTransform: 'uppercase', letterSpacing: 1 }}>Opening Stock (from Prior Year BS)</div>
-                        <div style={{ background: 'rgba(17,24,39,0.5)', border: '1px solid rgba(75,85,99,0.3)', borderRadius: 5, padding: '6px 10px', fontFamily: 'monospace', fontWeight: 700, fontSize: 12, color: '#a5b4fc' }}>
-                          RM {((parseFloat(ob.inventory) || 0)).toLocaleString('en-MY', { minimumFractionDigits: 2 })}
-                          <span style={{ fontSize: 8, color: '#6b7280', fontFamily: 'sans-serif', fontWeight: 400, marginLeft: 6 }}>
-                            {ob.inventory ? 'from Opening Balances' : 'enter in Opening Balances tab →'}
-                          </span>
-                        </div>
+                <div style={{ padding: 12, maxHeight: 280, overflowY: 'auto' }}>
+                  {inventoryLedger.length === 0 ? (
+                    <div style={{ padding: 20, textAlign: 'center', color: '#6b7280', fontSize: 11 }}>No inventory items. Click "+ Add Item" to add.</div>
+                  ) : (
+                    <>
+                      <div style={{ display: 'grid', gridTemplateColumns: '60px 1fr 50px 60px 70px 20px', gap: 4, padding: '4px 6px', background: 'rgba(52,211,153,0.1)', borderRadius: 4, fontSize: 8, fontWeight: 600, color: '#9ca3af', marginBottom: 4 }}>
+                        <span>Code</span><span>Description</span><span>Qty</span><span>Unit Cost</span><span>Total</span><span></span>
                       </div>
-                      <div>
-                        <div style={{ fontSize: 9, color: '#9ca3af', marginBottom: 3, textTransform: 'uppercase', letterSpacing: 1 }}>Closing Stock (Year End)</div>
-                        <input
-                          type="number"
-                          placeholder="e.g. 30000"
-                          value={closingInventory}
-                          onChange={e => setClosingInventory(e.target.value)}
-                          style={{ ...numInputStyle, width: '100%', padding: '6px 10px', fontSize: 12, fontWeight: 700, border: `1px solid ${closingInventory ? 'rgba(52,211,153,0.5)' : 'rgba(75,85,99,0.4)'}`, borderRadius: 5, color: '#34d399' }}
-                        />
+                      {inventoryLedger.map((item, i) => {
+                        const total = (parseFloat(item.qty) || 0) * (parseFloat(item.unitCost) || 0);
+                        return (
+                          <div key={item.id} style={{ display: 'grid', gridTemplateColumns: '60px 1fr 50px 60px 70px 20px', gap: 4, padding: '4px 6px', background: i % 2 ? 'transparent' : 'rgba(17,24,39,0.3)', borderRadius: 4, alignItems: 'center', fontSize: 9 }}>
+                            <input value={item.itemCode} onChange={e => updateInventoryItem(item.id, 'itemCode', e.target.value)} placeholder="SKU" style={{ ...inputStyle, padding: '3px 6px', fontSize: 9 }} />
+                            <input value={item.description} onChange={e => updateInventoryItem(item.id, 'description', e.target.value)} placeholder="Item name" style={{ ...inputStyle, padding: '3px 6px', fontSize: 9 }} />
+                            <input type="number" value={item.qty} onChange={e => updateInventoryItem(item.id, 'qty', e.target.value)} style={{ ...numInputStyle, padding: '3px 4px', fontSize: 9 }} />
+                            <input type="number" value={item.unitCost} onChange={e => updateInventoryItem(item.id, 'unitCost', e.target.value)} style={{ ...numInputStyle, padding: '3px 4px', fontSize: 9 }} />
+                            <span style={{ fontFamily: 'monospace', fontSize: 9, color: '#34d399' }}>{fmt(total).replace('MYR', '')}</span>
+                            <button onClick={() => removeInventoryItem(item.id)} style={{ width: 16, height: 16, background: 'rgba(239,68,68,0.2)', border: 'none', borderRadius: 2, color: '#f87171', cursor: 'pointer', fontSize: 9 }}>×</button>
+                          </div>
+                        );
+                      })}
+                      <div style={{ display: 'grid', gridTemplateColumns: '60px 1fr 50px 60px 70px 20px', gap: 4, padding: '6px', background: 'rgba(52,211,153,0.15)', borderRadius: 4, marginTop: 6, fontSize: 9, fontWeight: 700 }}>
+                        <span></span><span>TOTAL</span><span></span><span></span>
+                        <span style={{ fontFamily: 'monospace', color: '#34d399' }}>{fmt(subledgerTotals.inventory).replace('MYR', '')}</span>
+                        <span></span>
                       </div>
-                    </div>
-
-                    {/* COGS preview */}
-                    {(() => {
-                      const opening = parseFloat(ob.inventory) || 0;
-                      const purchases = res?.is?.details?.PURCHASE || 0;
-                      const freight = res?.is?.details?.FREIGHT_IN || 0;
-                      const directCosts = res?.is?.details?.DIRECT_COSTS || 0;
-                      const closing = parseFloat(closingInventory) || 0;
-                      const allPurchases = purchases + freight + directCosts;
-                      const cogs = opening + allPurchases - closing;
-                      return (opening > 0 || closing > 0) ? (
-                        <div style={{ background: 'rgba(52,211,153,0.06)', border: '1px solid rgba(52,211,153,0.2)', borderRadius: 6, padding: '8px 12px', fontSize: 10 }}>
-                          <div style={{ fontWeight: 700, color: '#34d399', marginBottom: 4 }}>COGS Calculation Preview</div>
-                          <div style={{ display: 'grid', gridTemplateColumns: '1fr auto', gap: 2, lineHeight: 1.8 }}>
-                            <span style={{ color: '#9ca3af' }}>Opening Stock</span>
-                            <span style={{ fontFamily: 'monospace', textAlign: 'right', color: '#a5b4fc' }}>RM {opening.toLocaleString('en-MY', {minimumFractionDigits:2})}</span>
-                            <span style={{ color: '#9ca3af' }}>+ Purchases {freight > 0 ? '+ Freight + Direct' : ''}</span>
-                            <span style={{ fontFamily: 'monospace', textAlign: 'right', color: '#e5e7eb' }}>RM {allPurchases.toLocaleString('en-MY', {minimumFractionDigits:2})}</span>
-                            <span style={{ color: '#9ca3af' }}>− Closing Stock</span>
-                            <span style={{ fontFamily: 'monospace', textAlign: 'right', color: '#f87171' }}>(RM {closing.toLocaleString('en-MY', {minimumFractionDigits:2})})</span>
-                            <span style={{ fontWeight: 700, color: '#34d399', borderTop: '1px solid rgba(52,211,153,0.3)', paddingTop: 2 }}>= Cost of Goods Sold</span>
-                            <span style={{ fontFamily: 'monospace', fontWeight: 700, textAlign: 'right', color: '#34d399', borderTop: '1px solid rgba(52,211,153,0.3)', paddingTop: 2 }}>RM {Math.max(0, cogs).toLocaleString('en-MY', {minimumFractionDigits:2})}</span>
-                          </div>
-                          {!res && <div style={{ fontSize: 9, color: '#6b7280', marginTop: 4 }}>Generate FS to see final calculation.</div>}
-                        </div>
-                      ) : null;
-                    })()}
-                  </div>
-
-                  {/* ── Optional: SKU detail (collapsible) ── */}
-                  <details style={{ marginTop: 8 }}>
-                    <summary style={{ fontSize: 10, color: '#6b7280', cursor: 'pointer', userSelect: 'none', padding: '4px 0' }}>
-                      + Optional: Add SKU breakdown (overrides closing stock value above if filled)
-                    </summary>
-                    <div style={{ marginTop: 8 }}>
-                      <div style={{ display: 'flex', justifyContent: 'flex-end', marginBottom: 6 }}>
-                        <button onClick={addInventoryItem} style={{ padding: '3px 10px', background: 'rgba(52,211,153,0.2)', border: 'none', borderRadius: 4, color: '#34d399', fontSize: 9, cursor: 'pointer' }}>+ Add SKU</button>
-                      </div>
-                      {inventoryLedger.length === 0 ? (
-                        <div style={{ padding: 12, textAlign: 'center', color: '#6b7280', fontSize: 10 }}>No SKU items. Add if you have itemised stock count.</div>
-                      ) : (
-                        <>
-                          <div style={{ display: 'grid', gridTemplateColumns: '60px 1fr 50px 60px 70px 20px', gap: 4, padding: '4px 6px', background: 'rgba(52,211,153,0.1)', borderRadius: 4, fontSize: 8, fontWeight: 600, color: '#9ca3af', marginBottom: 4 }}>
-                            <span>Code</span><span>Description</span><span>Qty</span><span>Unit Cost</span><span>Total</span><span></span>
-                          </div>
-                          {inventoryLedger.map((item, i) => {
-                            const total = (parseFloat(item.qty) || 0) * (parseFloat(item.unitCost) || 0);
-                            return (
-                              <div key={item.id} style={{ display: 'grid', gridTemplateColumns: '60px 1fr 50px 60px 70px 20px', gap: 4, padding: '4px 6px', background: i % 2 ? 'transparent' : 'rgba(17,24,39,0.3)', borderRadius: 4, alignItems: 'center', fontSize: 9 }}>
-                                <input value={item.itemCode} onChange={e => updateInventoryItem(item.id, 'itemCode', e.target.value)} placeholder="SKU" style={{ ...inputStyle, padding: '3px 6px', fontSize: 9 }} />
-                                <input value={item.description} onChange={e => updateInventoryItem(item.id, 'description', e.target.value)} placeholder="Item name" style={{ ...inputStyle, padding: '3px 6px', fontSize: 9 }} />
-                                <input type="number" value={item.qty} onChange={e => updateInventoryItem(item.id, 'qty', e.target.value)} style={{ ...numInputStyle, padding: '3px 4px', fontSize: 9 }} />
-                                <input type="number" value={item.unitCost} onChange={e => updateInventoryItem(item.id, 'unitCost', e.target.value)} style={{ ...numInputStyle, padding: '3px 4px', fontSize: 9 }} />
-                                <span style={{ fontFamily: 'monospace', fontSize: 9, color: '#34d399' }}>{fmt(total).replace('MYR', '')}</span>
-                                <button onClick={() => removeInventoryItem(item.id)} style={{ width: 16, height: 16, background: 'rgba(239,68,68,0.2)', border: 'none', borderRadius: 2, color: '#f87171', cursor: 'pointer', fontSize: 9 }}>×</button>
-                              </div>
-                            );
-                          })}
-                          <div style={{ padding: '5px 6px', background: 'rgba(52,211,153,0.12)', borderRadius: 4, marginTop: 4, fontSize: 9, fontWeight: 700, display: 'flex', justifyContent: 'space-between' }}>
-                            <span>SKU Total (used as Closing Stock)</span>
-                            <span style={{ fontFamily: 'monospace', color: '#34d399' }}>RM {subledgerTotals.inventory.toLocaleString('en-MY', {minimumFractionDigits:2})}</span>
-                          </div>
-                        </>
-                      )}
-                    </div>
-                  </details>
+                    </>
+                  )}
                 </div>
               </div>
               
               {/* Trade Receivables */}
               <div style={{ background: 'rgba(31,41,55,0.6)', borderRadius: 10, border: '1px solid rgba(75,85,99,0.3)', overflow: 'hidden' }}>
                 <div style={{ padding: '10px 16px', borderBottom: '1px solid rgba(75,85,99,0.2)', display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
-                  <div>
-                    <span style={{ fontWeight: 700, fontSize: 13 }}>👥 Trade Receivables (Debtors)</span>
-                    <span style={{ fontSize: 9, color: '#6b7280', marginLeft: 6 }}>→ BS: Trade Receivables</span>
-                    <div style={{ fontSize: 8, color: '#6b7280', marginTop: 1 }}>Enter outstanding customer invoices at year-end. Overrides TB if populated.</div>
-                  </div>
+                  <span style={{ fontWeight: 700, fontSize: 13 }}>👥 Trade Receivables (Debtors)</span>
                   <button onClick={addReceivable} style={{ padding: '4px 10px', background: 'rgba(251,191,36,0.2)', border: 'none', borderRadius: 4, color: '#fbbf24', fontSize: 10, cursor: 'pointer' }}>+ Add Customer</button>
                 </div>
-                <div style={{ padding: 12, maxHeight: 280, overflowY: 'auto' }}>
+
+                {/* AR Control Account — auto-derived from OB tab + classify RECEIPT_DEBTOR */}
+                {(() => {
+                  const obAR = parseFloat(ob.trade_receivables) || 0;
+                  const receiptDebtorTotal = txs
+                    .filter(tx => (tx.classification || '') === 'RECEIPT_DEBTOR')
+                    .reduce((sum, tx) => sum + Math.abs(parseFloat(tx.amount) || 0), 0);
+                  const closingAR = obAR - receiptDebtorTotal;
+                  const diff = Math.abs(closingAR - subledgerTotals.receivables);
+                  return (
+                    <div style={{ margin: '10px 12px 0', background: 'rgba(251,191,36,0.08)', border: '1px solid rgba(251,191,36,0.3)', borderRadius: 8, padding: 10 }}>
+                      <div style={{ fontSize: 10, fontWeight: 700, color: '#fbbf24', marginBottom: 8, display: 'flex', alignItems: 'center', gap: 6 }}>
+                        📋 AR Control Account <span style={{ fontSize: 8, color: '#9ca3af', fontWeight: 400 }}>auto-linked from Opening Balances &amp; Classify</span>
+                      </div>
+                      <div style={{ display: 'grid', gridTemplateColumns: '1fr auto', gap: '4px 12px', fontSize: 10 }}>
+                        <span style={{ color: '#9ca3af' }}>Opening Balance (from OB tab)</span>
+                        <span style={{ fontFamily: 'monospace', color: '#e5e7eb', textAlign: 'right' }}>{fmt(obAR)}</span>
+                        <span style={{ color: '#9ca3af' }}>
+                          Less: Collections — RECEIPT_DEBTOR
+                          <span style={{ fontSize: 8, color: '#6b7280', marginLeft: 6 }}>({txs.filter(tx => tx.classification === 'RECEIPT_DEBTOR').length} txns from classify)</span>
+                        </span>
+                        <span style={{ fontFamily: 'monospace', color: '#f87171', textAlign: 'right' }}>({fmt(receiptDebtorTotal)})</span>
+                        <span style={{ color: '#fbbf24', fontWeight: 600, borderTop: '1px solid rgba(251,191,36,0.3)', paddingTop: 4 }}>Closing AR Balance</span>
+                        <span style={{ fontFamily: 'monospace', color: closingAR <= 0 ? '#34d399' : '#fbbf24', fontWeight: 700, textAlign: 'right', borderTop: '1px solid rgba(251,191,36,0.3)', paddingTop: 4 }}>{fmt(closingAR)}</span>
+                      </div>
+                      {tradeReceivables.length > 0 && (
+                        <div style={{ marginTop: 8, fontSize: 9, padding: '4px 8px', borderRadius: 4, background: diff < 1 ? 'rgba(52,211,153,0.1)' : 'rgba(251,191,36,0.1)', color: diff < 1 ? '#34d399' : '#fbbf24' }}>
+                          {diff < 1 ? '✓ Matches customer aging list' : `⚠ Diff vs aging list: ${fmt(diff)}`}
+                        </div>
+                      )}
+                      {obAR === 0 && receiptDebtorTotal === 0 && (
+                        <div style={{ marginTop: 6, fontSize: 9, color: '#6b7280', fontStyle: 'italic' }}>
+                          Set opening balance in the Opening Balances tab, then classify RECEIPT_DEBTOR transactions in Classify to populate this control account.
+                        </div>
+                      )}
+                    </div>
+                  );
+                })()}
+
+                <div style={{ padding: 12, maxHeight: 260, overflowY: 'auto', marginTop: 10 }}>
                   {tradeReceivables.length === 0 ? (
-                    <div style={{ padding: 20, textAlign: 'center', color: '#6b7280', fontSize: 11 }}>No receivables. Click "+ Add Customer" to add.</div>
+                    <div style={{ padding: '8px 4px', textAlign: 'center', color: '#6b7280', fontSize: 10 }}>No per-customer detail yet. Click "+ Add Customer" to build an ageing schedule.</div>
                   ) : (
                     <>
                       <div style={{ display: 'grid', gridTemplateColumns: '1fr 60px 70px 60px 60px 20px', gap: 4, padding: '4px 6px', background: 'rgba(251,191,36,0.1)', borderRadius: 4, fontSize: 8, fontWeight: 600, color: '#9ca3af', marginBottom: 4 }}>
@@ -12839,10 +12754,7 @@ ${res.bs.borr > 0 ? `<h3>${noteN.borrowings}. ${isEN ? 'BORROWINGS' : 'PINJAMAN'
               {/* Other Debtors */}
               <div style={{ background: 'rgba(31,41,55,0.6)', borderRadius: 10, border: '1px solid rgba(75,85,99,0.3)', overflow: 'hidden' }}>
                 <div style={{ padding: '10px 16px', borderBottom: '1px solid rgba(75,85,99,0.2)', display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
-                  <div>
-                    <span style={{ fontWeight: 700, fontSize: 13 }}>📋 Other Debtors</span>
-                    <span style={{ fontSize: 9, color: '#6b7280', marginLeft: 6 }}>→ BS: Other Receivables</span>
-                  </div>
+                  <span style={{ fontWeight: 700, fontSize: 13 }}>📋 Other Debtors</span>
                   <button onClick={addOtherDebtor} style={{ padding: '4px 10px', background: 'rgba(139,92,246,0.2)', border: 'none', borderRadius: 4, color: '#c084fc', fontSize: 10, cursor: 'pointer' }}>+ Add</button>
                 </div>
                 <div style={{ padding: 12, maxHeight: 250, overflowY: 'auto' }}>
@@ -15782,7 +15694,7 @@ ${res.bs.borr > 0 ? `<h3>${noteN.borrowings}. ${isEN ? 'BORROWINGS' : 'PINJAMAN'
               {/* Header */}
               <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 16 }}>
                 <div style={{ display: 'flex', alignItems: 'center', gap: 12 }}>
-                  <button onClick={goBack} style={backBtnStyle}>← Tax Computation</button>
+                  <button onClick={goBack} style={backBtnStyle}>← Snapshots</button>
                   <span style={{ fontWeight: 700, fontSize: 16 }}>📊 Financial Dashboard</span>
                 </div>
                 <div style={{ display: 'flex', alignItems: 'center', gap: 12 }}>
