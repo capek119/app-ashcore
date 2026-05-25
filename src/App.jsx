@@ -444,6 +444,9 @@ const CLASS_ALIAS = {
   'COGS': 'PURCHASE',
   'MISC_EXPENSE': 'MISCELLANEOUS',
   'OFFICE': 'OFFICE_SUPPLIES',
+  // FIX: LOAN code not in FSEngine.rules → was falling to SUSPENSE (reversed direction).
+  // Treat LOAN as a standard short-term loan repayment (Dr Short_term_loan, Cr Bank).
+  'LOAN': 'LOAN_REPAY_ST',
 };
 
 // Build FSEngine.rules from FS_STRUCTURE
@@ -600,9 +603,12 @@ const FSEngine = {
         entries.push({ acc: 'trade_payables', dr: amt, cr: 0 }, { acc: moneyAcc, dr: 0, cr: amt }); 
       }
     }
-    else { 
+    else {
       // SUSPENSE - use correct money account (cash_on_hand for cash vouchers)
-      entries.push({ acc: 'suspense', dr: isIn ? amt : 0, cr: isIn ? 0 : amt }, { acc: moneyAcc, dr: isIn ? 0 : amt, cr: isIn ? amt : 0 }); 
+      // FIX: Correct JE direction — Dr Bank/Cr Suspense for inflows, Dr Suspense/Cr Bank for outflows.
+      // Previous code had the accounts swapped, causing every unclassified outflow to INCREASE bank
+      // (Dr Bank) instead of decrease it, and every unclassified inflow to DECREASE bank.
+      entries.push({ acc: moneyAcc, dr: isIn ? amt : 0, cr: isIn ? 0 : amt }, { acc: 'suspense', dr: isIn ? 0 : amt, cr: isIn ? amt : 0 });
     }
     return { date: tx.date || '', desc: tx.description || '', ref: tx.reference || '', entries, cls: cls.code, source: tx.source || 'Manual', bank: tx.bankAccount || 'Default', documentType: isCashVoucher ? 'CV' : 'BT' };
   },
@@ -1039,7 +1045,15 @@ const FSEngine = {
       // PPE: Use NBV change + depreciation to estimate purchases (since we don't have PY cost)
       // Change in NBV = Purchases - Disposals - Depreciation
       // Purchases = Change in NBV + Depreciation (assuming no disposals)
-      ppePurchases: -(Math.max(0, (bs.ppe - (bs.py_ppe || 0)) + (is.dep || 0))),
+      // FIX: When priorBS is null (no Prior FS entered), py_ppe defaults to 0, causing the engine to
+      // treat the full opening PPE balance as a current-year purchase. Instead, infer the opening NBV
+      // from the OB entries (fixed_asset minus accumulated_depreciation opening balances).
+      ppePurchases: (() => {
+        const obPPECost  = tb.reduce((s, r) => (r.acc === 'fixed_asset' || r.acc === 'ppe')  ? s + (r.op || 0) : s, 0);
+        const obAccDep   = tb.reduce((s, r) => r.acc === 'accumulated_depreciation' ? s + Math.abs(r.op || 0) : s, 0);
+        const openingNBV = bs.py_ppe > 0 ? bs.py_ppe : (obPPECost - obAccDep);
+        return -(Math.max(0, (bs.ppe - openingNBV) + (is.dep || 0)));
+      })(),
       // MAA FIX-6: Populate from subledger ppeDisposalProceeds (disposal proceeds in current FY)
       ppeDisposals: subledgerData?.ppeDisposalProceeds || 0,
       investmentPurchases: -Math.max(0, (bs.investments || 0) - (bs.py_investments || 0)),
@@ -9648,7 +9662,7 @@ ${res.bs.borr > 0 ? `<h3>${noteN.borrowings}. ${isEN ? 'BORROWINGS' : 'PINJAMAN'
                 <div style={{ fontSize: 12, fontWeight: 700, color: '#E85525' }}>Management Accounts — ashcore Format</div>
                 <span style={{ background: 'rgba(232,85,37,0.2)', color: '#E85525', padding: '1px 8px', borderRadius: 10, fontSize: 9, fontWeight: 700 }}>NEW</span>
               </div>
-              <div style={{ fontSize: 9, color: '#a5b4fc', marginBottom: 10, color: '#9ca3af' }}>
+              <div style={{ fontSize: 9, color: '#9ca3af', marginBottom: 10 }}>
                 Internal MA document (unaudited) — Cover · Executive Summary · P&L · Balance Sheet · Cash Flow · Expense Schedule · AR/AP Ageing · PPE & Borrowings Schedules
               </div>
               <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 8 }}>
