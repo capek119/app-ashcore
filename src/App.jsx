@@ -2164,10 +2164,10 @@ export default function App() {
     const roe = totalEquity > 0 ? (pat / totalEquity) * 100 : 0;
     const roa = totalAssets > 0 ? (pat / totalAssets) * 100 : 0;
     
-    // Liquidity Ratios
-    const currentRatio = currentLiabilities > 0 ? currentAssets / currentLiabilities : (currentAssets > 0 ? 999 : 0);
-    const quickRatio = currentLiabilities > 0 ? (currentAssets - inventoryTotal) / currentLiabilities : 0;
-    const cashRatio = currentLiabilities > 0 ? cashTotal / currentLiabilities : 0;
+    // Liquidity Ratios — null means N/A (no current liabilities, ratio is not meaningful)
+    const currentRatio = currentLiabilities > 0 ? currentAssets / currentLiabilities : null;
+    const quickRatio   = currentLiabilities > 0 ? (currentAssets - inventoryTotal) / currentLiabilities : null;
+    const cashRatio    = currentLiabilities > 0 ? cashTotal / currentLiabilities : null;
     
     // Efficiency Ratios (Days)
     const dso = revenue > 0 ? (arTotal / revenue) * 365 : 0;
@@ -2276,28 +2276,37 @@ export default function App() {
     }
     
     // === LIQUIDITY INSIGHTS ===
-    if (currentRatio < 1) {
-      insights.push({ 
-        type: 'danger', 
-        icon: '🚨', 
+    if (currentRatio === null) {
+      insights.push({
+        type: 'success',
+        icon: '✅',
+        category: 'Liquidity',
+        title: 'No Current Liabilities',
+        text: `Current ratio is N/A — the company has no current liabilities.`,
+        detail: `With no short-term obligations, the liquidity ratio is not applicable. This is a strong position; all assets are equity-funded or long-term funded.`
+      });
+    } else if (currentRatio < 1) {
+      insights.push({
+        type: 'danger',
+        icon: '🚨',
         category: 'Liquidity',
         title: 'Liquidity Risk',
         text: `Current ratio is ${currentRatio.toFixed(2)}x (below 1.0).`,
         detail: `The company may struggle to meet short-term obligations. Current liabilities (RM ${fmt(currentLiabilities)}) exceed current assets (RM ${fmt(currentAssets)}). Consider: (1) Accelerating receivables collection, (2) Extending payables terms, (3) Short-term financing.`
       });
-    } else if (currentRatio >= 1.5 && currentRatio < 999) {
-      insights.push({ 
-        type: 'success', 
-        icon: '💰', 
+    } else if (currentRatio >= 1.5) {
+      insights.push({
+        type: 'success',
+        icon: '💰',
         category: 'Liquidity',
         title: 'Healthy Liquidity',
         text: `Current ratio of ${currentRatio.toFixed(2)}x indicates strong short-term financial health.`,
         detail: `Sufficient current assets to cover current liabilities. Working capital position is sound.`
       });
     } else if (currentRatio > 3) {
-      insights.push({ 
-        type: 'warning', 
-        icon: '💭', 
+      insights.push({
+        type: 'warning',
+        icon: '💭',
         category: 'Liquidity',
         title: 'Excess Liquidity',
         text: `Current ratio of ${currentRatio.toFixed(2)}x may indicate excess idle assets.`,
@@ -7150,7 +7159,7 @@ ${html.replace(/<html[^>]*>/, '').replace(/<\/html>/, '').replace(/<head>[\s\S]*
     
     const calcAgeing = (items) => { const a = { current: 0, d30: 0, d60: 0, d90: 0, over90: 0, total: 0 }; const today = new Date(); items.forEach(inv => { const amt = parseFloat(inv.amount) || 0; const days = Math.max(0, Math.floor((today - new Date(inv.dueDate)) / 86400000)); if (days <= 0) a.current += amt; else if (days <= 30) a.d30 += amt; else if (days <= 60) a.d60 += amt; else if (days <= 90) a.d90 += amt; else a.over90 += amt; a.total += amt; }); return a; };
     
-    const ratios = { gpMargin: res.is.rev > 0 ? res.is.gp / res.is.rev * 100 : 0, npMargin: res.is.rev > 0 ? res.is.np / res.is.rev * 100 : 0, currentRatio: res.bs.totCL > 0 ? res.bs.totCA / res.bs.totCL : 0, quickRatio: res.bs.totCL > 0 ? (res.bs.totCA - (res.bs.inv || 0)) / res.bs.totCL : 0, debtToEquity: res.bs.totE > 0 ? res.bs.totL / res.bs.totE : 0, roe: res.bs.totE > 0 ? res.is.np / res.bs.totE * 100 : 0, roa: res.bs.totA > 0 ? res.is.np / res.bs.totA * 100 : 0, workingCapital: res.bs.totCA - res.bs.totCL };
+    const ratios = { gpMargin: res.is.rev > 0 ? res.is.gp / res.is.rev * 100 : 0, npMargin: res.is.rev > 0 ? res.is.np / res.is.rev * 100 : 0, currentRatio: res.bs.totCL > 0 ? res.bs.totCA / res.bs.totCL : null, quickRatio: res.bs.totCL > 0 ? (res.bs.totCA - (res.bs.inv || 0)) / res.bs.totCL : null, debtToEquity: res.bs.totE > 0 ? res.bs.totL / res.bs.totE : 0, roe: res.bs.totE > 0 ? res.is.np / res.bs.totE * 100 : 0, roa: res.bs.totA > 0 ? res.is.np / res.bs.totA * 100 : 0, workingCapital: res.bs.totCA - res.bs.totCL };
     
     const ppeItems = ppeRegister.map(p => { const cost = parseFloat(p.cost) || 0; const accDep = parseFloat(p.accDepBF) || 0; const cat = PPE_CATEGORIES[p.category] || PPE_CATEGORIES['OFFICE_EQUIPMENT']; const currDep = Math.min(cost * (cat.rate / 100), cost - accDep); return { desc: p.description, cost, nbv: cost - accDep - currDep }; });
     const topDebtors = [...tradeReceivables].sort((a, b) => (parseFloat(b.amount)||0) - (parseFloat(a.amount)||0)).slice(0, 5);
@@ -7165,6 +7174,9 @@ ${html.replace(/<html[^>]*>/, '').replace(/<\/html>/, '').replace(/<head>[\s\S]*
     const isEN = meta.lang !== 'BM';
     
     const bar = (pct, color) => `<div style="height:14px;background:#e5e7eb;border-radius:3px;overflow:hidden"><div style="height:100%;width:${Math.min(pct,100)}%;background:${color};border-radius:3px"></div></div>`;
+    // Safe ratio formatter: null means no current liabilities → show N/A
+    const fmtR = (v) => (v == null || !isFinite(v)) ? 'N/A' : v.toFixed(2);
+    const ratioColor = (v, goodThreshold, bad) => v == null ? '#64748b' : (bad ? (v <= goodThreshold ? '#059669' : '#dc2626') : (v >= goodThreshold ? '#059669' : '#dc2626'));
     
     const css = `@page{size:A4;margin:8mm}@media print{.page{page-break-after:always}.page:last-child{page-break-after:avoid}}*{box-sizing:border-box;margin:0;padding:0}body{font-family:'Segoe UI',Arial,sans-serif;font-size:9pt;color:#1f2937;max-width:210mm;margin:0 auto;background:#fff}.page{padding:12px;min-height:285mm;position:relative}.hdr{background:linear-gradient(135deg,#1e3a8a,#3b82f6);color:#fff;padding:12px 16px;border-radius:6px;margin-bottom:10px;display:flex;justify-content:space-between;align-items:center}.hdr h1{font-size:14pt;margin:0}.hdr .sub{font-size:8pt;opacity:.9}.hdr .meta{text-align:right;font-size:7pt;opacity:.8}.sec{margin-bottom:8px}.sec-title{font-size:10pt;font-weight:700;color:#1e3a8a;border-bottom:2px solid #3b82f6;padding-bottom:3px;margin-bottom:6px}.g2{display:grid;grid-template-columns:1fr 1fr;gap:8px}.g3{display:grid;grid-template-columns:1fr 1fr 1fr;gap:6px}.g4{display:grid;grid-template-columns:1fr 1fr 1fr 1fr;gap:6px}.card{background:#f8fafc;border:1px solid #e2e8f0;border-radius:5px;padding:8px}.card.blue{background:linear-gradient(135deg,#eff6ff,#dbeafe);border-color:#93c5fd}.card.green{background:linear-gradient(135deg,#f0fdf4,#dcfce7);border-color:#86efac}.card.red{background:linear-gradient(135deg,#fef2f2,#fee2e2);border-color:#fca5a5}.card.purple{background:linear-gradient(135deg,#faf5ff,#f3e8ff);border-color:#c4b5fd}.card.amber{background:linear-gradient(135deg,#fffbeb,#fef3c7);border-color:#fcd34d}.kpi{text-align:center}.kv{font-size:15pt;font-weight:700;color:#1e3a8a}.kv.grn{color:#059669}.kv.rd{color:#dc2626}.kl{font-size:7pt;color:#64748b;text-transform:uppercase;margin-top:1px}.ks{font-size:7pt;color:#6b7280}table{width:100%;border-collapse:collapse;font-size:8pt}th,td{padding:3px 5px;text-align:left;border-bottom:1px solid #e5e7eb}th{background:#f1f5f9;font-weight:600;color:#475569;font-size:7pt}.r{text-align:right}.b{font-weight:700}.tr{background:#f1f5f9;font-weight:700;border-top:2px solid #3b82f6}.ftr{position:absolute;bottom:6px;left:12px;right:12px;text-align:center;font-size:7pt;color:#9ca3af;border-top:1px solid #e5e7eb;padding-top:3px}.ct{font-weight:600;color:#1e3a8a;margin-bottom:5px;font-size:8pt}`;
     
@@ -7195,8 +7207,8 @@ ${html.replace(/<html[^>]*>/, '').replace(/<\/html>/, '').replace(/<head>[\s\S]*
           <tr class="tr" style="background:#dcfce7"><td class="b">${isEN ? 'Net Profit' : 'Untung Bersih'}</td><td class="r b" style="color:${is.np>=0?'#059669':'#dc2626'}">${fmtNum(is.np)}</td><td class="r b">${fmtPct(ratios.npMargin)}</td></tr></table>
         </div>
         <div class="card"><div class="ct">📈 ${isEN ? 'Financial Ratios' : 'Nisbah Kewangan'}</div>
-          <table><tr><td>${isEN ? 'Current Ratio' : 'Nisbah Semasa'}</td><td class="r b" style="color:${ratios.currentRatio >= 1 ? '#059669' : '#dc2626'}">${ratios.currentRatio.toFixed(2)}</td><td style="width:80px">${bar(ratios.currentRatio/2*100, ratios.currentRatio >= 1 ? '#10b981' : '#ef4444')}</td></tr>
-          <tr><td>${isEN ? 'Quick Ratio' : 'Nisbah Cepat'}</td><td class="r b" style="color:${ratios.quickRatio >= 1 ? '#059669' : '#dc2626'}">${ratios.quickRatio.toFixed(2)}</td><td>${bar(ratios.quickRatio/2*100, ratios.quickRatio >= 1 ? '#10b981' : '#ef4444')}</td></tr>
+          <table><tr><td>${isEN ? 'Current Ratio' : 'Nisbah Semasa'}</td><td class="r b" style="color:${ratioColor(ratios.currentRatio,1,false)}">${fmtR(ratios.currentRatio)}</td><td style="width:80px">${ratios.currentRatio != null ? bar(ratios.currentRatio/2*100, ratios.currentRatio >= 1 ? '#10b981' : '#ef4444') : '<span style="font-size:7pt;color:#64748b">N/A</span>'}</td></tr>
+          <tr><td>${isEN ? 'Quick Ratio' : 'Nisbah Cepat'}</td><td class="r b" style="color:${ratioColor(ratios.quickRatio,1,false)}">${fmtR(ratios.quickRatio)}</td><td>${ratios.quickRatio != null ? bar(ratios.quickRatio/2*100, ratios.quickRatio >= 1 ? '#10b981' : '#ef4444') : '<span style="font-size:7pt;color:#64748b">N/A</span>'}</td></tr>
           <tr><td>${isEN ? 'Debt to Equity' : 'Hutang/Ekuiti'}</td><td class="r b" style="color:${ratios.debtToEquity <= 1 ? '#059669' : '#f59e0b'}">${ratios.debtToEquity.toFixed(2)}</td><td>${bar(ratios.debtToEquity/2*100, ratios.debtToEquity <= 1 ? '#10b981' : '#f59e0b')}</td></tr>
           <tr><td>${isEN ? 'Return on Equity' : 'Pulangan Ekuiti'}</td><td class="r b">${fmtPct(ratios.roe)}</td><td>${bar(Math.abs(ratios.roe)/30*100, ratios.roe >= 0 ? '#3b82f6' : '#ef4444')}</td></tr>
           <tr><td>${isEN ? 'Return on Assets' : 'Pulangan Aset'}</td><td class="r b">${fmtPct(ratios.roa)}</td><td>${bar(Math.abs(ratios.roa)/20*100, ratios.roa >= 0 ? '#3b82f6' : '#ef4444')}</td></tr>
@@ -7227,7 +7239,8 @@ ${html.replace(/<html[^>]*>/, '').replace(/<\/html>/, '').replace(/<head>[\s\S]*
     const insights = [];
     if (ratios.gpMargin >= 30) insights.push({ type: 'good', text: isEN ? 'Strong gross margin above 30% indicates healthy pricing and cost control' : 'Margin kasar kukuh melebihi 30% menunjukkan penetapan harga dan kawalan kos yang sihat' });
     else if (ratios.gpMargin < 20) insights.push({ type: 'warn', text: isEN ? 'Gross margin below 20% may indicate pricing pressure or high direct costs' : 'Margin kasar di bawah 20% mungkin menunjukkan tekanan harga atau kos langsung yang tinggi' });
-    if (ratios.currentRatio >= 1.5) insights.push({ type: 'good', text: isEN ? 'Current ratio above 1.5 shows healthy short-term liquidity' : 'Nisbah semasa melebihi 1.5 menunjukkan kecairan jangka pendek yang sihat' });
+    if (ratios.currentRatio == null) insights.push({ type: 'good', text: isEN ? 'No current liabilities — current ratio is N/A (strong position)' : 'Tiada liabiliti semasa — nisbah semasa tidak berkenaan (kedudukan kukuh)' });
+    else if (ratios.currentRatio >= 1.5) insights.push({ type: 'good', text: isEN ? 'Current ratio above 1.5 shows healthy short-term liquidity' : 'Nisbah semasa melebihi 1.5 menunjukkan kecairan jangka pendek yang sihat' });
     else if (ratios.currentRatio < 1) insights.push({ type: 'warn', text: isEN ? 'Current ratio below 1 indicates potential liquidity risk' : 'Nisbah semasa di bawah 1 menunjukkan risiko kecairan' });
     if (arAgeing.over90 > arAgeing.total * 0.2) insights.push({ type: 'warn', text: isEN ? `${fmtPct(arAgeing.over90/arAgeing.total*100)} of receivables overdue >90 days - review collection efforts` : `${fmtPct(arAgeing.over90/arAgeing.total*100)} penghutang tertunggak >90 hari - semak usaha kutipan` });
     if (ratios.debtToEquity > 2) insights.push({ type: 'warn', text: isEN ? 'High leverage with debt-to-equity above 2x' : 'Leveraj tinggi dengan hutang/ekuiti melebihi 2x' });
@@ -7287,7 +7300,7 @@ ${html.replace(/<html[^>]*>/, '').replace(/<\/html>/, '').replace(/<head>[\s\S]*
         <div style="font-size:11pt;font-weight:700;margin-bottom:8px">⚡ ${isEN ? 'Financial Health Score' : 'Skor Kesihatan Kewangan'}</div>
         <div class="g4">
           <div style="text-align:center"><div style="font-size:20pt;font-weight:700">${ratios.gpMargin >= 30 ? 'A' : ratios.gpMargin >= 20 ? 'B' : ratios.gpMargin >= 10 ? 'C' : 'D'}</div><div style="font-size:7pt;opacity:.9">${isEN ? 'Profitability' : 'Keuntungan'}</div></div>
-          <div style="text-align:center"><div style="font-size:20pt;font-weight:700">${ratios.currentRatio >= 2 ? 'A' : ratios.currentRatio >= 1.5 ? 'B' : ratios.currentRatio >= 1 ? 'C' : 'D'}</div><div style="font-size:7pt;opacity:.9">${isEN ? 'Liquidity' : 'Kecairan'}</div></div>
+          <div style="text-align:center"><div style="font-size:20pt;font-weight:700">${ratios.currentRatio == null ? 'N/A' : ratios.currentRatio >= 2 ? 'A' : ratios.currentRatio >= 1.5 ? 'B' : ratios.currentRatio >= 1 ? 'C' : 'D'}</div><div style="font-size:7pt;opacity:.9">${isEN ? 'Liquidity' : 'Kecairan'}</div></div>
           <div style="text-align:center"><div style="font-size:20pt;font-weight:700">${ratios.debtToEquity <= 0.5 ? 'A' : ratios.debtToEquity <= 1 ? 'B' : ratios.debtToEquity <= 2 ? 'C' : 'D'}</div><div style="font-size:7pt;opacity:.9">${isEN ? 'Leverage' : 'Leveraj'}</div></div>
           <div style="text-align:center"><div style="font-size:20pt;font-weight:700">${arAgeing.over90 <= arAgeing.total * 0.1 ? 'A' : arAgeing.over90 <= arAgeing.total * 0.2 ? 'B' : arAgeing.over90 <= arAgeing.total * 0.3 ? 'C' : 'D'}</div><div style="font-size:7pt;opacity:.9">${isEN ? 'Collections' : 'Kutipan'}</div></div>
         </div>
@@ -7889,7 +7902,8 @@ ${html.replace(/<html[^>]*>/, '').replace(/<\/html>/, '').replace(/<head>[\s\S]*
       const insights = [];
       if (ratios.gpMargin >= 30) insights.push(isEN ? '✓ Strong gross margin above 30%' : '✓ Margin kasar kukuh melebihi 30%');
       else if (ratios.gpMargin < 20) insights.push(isEN ? '⚠ Gross margin below 20% needs attention' : '⚠ Margin kasar di bawah 20% perlu perhatian');
-      if (ratios.currentRatio >= 1.5) insights.push(isEN ? '✓ Healthy liquidity position' : '✓ Kedudukan kecairan sihat');
+      if (ratios.currentRatio == null) insights.push(isEN ? '✓ No current liabilities (N/A ratio)' : '✓ Tiada liabiliti semasa (nisbah N/A)');
+      else if (ratios.currentRatio >= 1.5) insights.push(isEN ? '✓ Healthy liquidity position' : '✓ Kedudukan kecairan sihat');
       else if (ratios.currentRatio < 1) insights.push(isEN ? '⚠ Current ratio below 1 - liquidity risk' : '⚠ Nisbah semasa di bawah 1 - risiko kecairan');
       if (arAgeing.over90 > arAgeing.total * 0.2) insights.push(isEN ? '⚠ High overdue receivables (>20%)' : '⚠ Penghutang tertunggak tinggi (>20%)');
       if (ratios.debtToEquity > 2) insights.push(isEN ? '⚠ High leverage - debt/equity > 2' : '⚠ Leveraj tinggi - hutang/ekuiti > 2');
@@ -7919,8 +7933,8 @@ ${html.replace(/<html[^>]*>/, '').replace(/<\/html>/, '').replace(/<head>[\s\S]*
       slide.addText(isEN ? 'Financial Ratios' : 'Nisbah Kewangan', { x: 0.3, y: 0.3, w: 9.4, h: 0.5, fontSize: 24, bold: true, color: '1e3a8a' });
       
       const ratioRows = [
-        [isEN ? 'Current Ratio' : 'Nisbah Semasa', ratios.currentRatio.toFixed(2), ratios.currentRatio >= 1 ? '✓' : '⚠'],
-        [isEN ? 'Quick Ratio' : 'Nisbah Cepat', ratios.quickRatio.toFixed(2), ratios.quickRatio >= 1 ? '✓' : '⚠'],
+        [isEN ? 'Current Ratio' : 'Nisbah Semasa', fmtR(ratios.currentRatio), ratios.currentRatio == null ? 'N/A' : ratios.currentRatio >= 1 ? '✓' : '⚠'],
+        [isEN ? 'Quick Ratio' : 'Nisbah Cepat', fmtR(ratios.quickRatio), ratios.quickRatio == null ? 'N/A' : ratios.quickRatio >= 1 ? '✓' : '⚠'],
         [isEN ? 'Debt to Equity' : 'Hutang/Ekuiti', ratios.debtToEquity.toFixed(2), ratios.debtToEquity <= 1 ? '✓' : '⚠'],
         [isEN ? 'Return on Equity' : 'Pulangan Ekuiti', fmtPct(ratios.roe), ratios.roe >= 10 ? '✓' : '⚠'],
         [isEN ? 'Working Capital' : 'Modal Kerja', `RM ${fmtNum(ratios.workingCapital)}`, ratios.workingCapital >= 0 ? '✓' : '⚠']
@@ -10011,7 +10025,7 @@ ${res.bs.borr > 0 ? `<h3>${noteN.borrowings}. ${isEN ? 'BORROWINGS' : 'PINJAMAN'
     <tr class="highlight"><td>Gross Profit</td><td class="right">RM ${fmtK(is.gp)} (${fmtPct(ratios.gpMargin)})</td></tr>
     <tr><td>Net Profit</td><td class="right">RM ${fmtK(is.np)} (${fmtPct(ratios.npMargin)})</td></tr>
     <tr class="highlight"><td>Cash Balance</td><td class="right">RM ${fmtK(bs.cash)}</td></tr>
-    <tr><td>Current Ratio</td><td class="right">${ratios.currentRatio.toFixed(2)}</td></tr>
+    <tr><td>Current Ratio</td><td class="right">${fmtR(ratios.currentRatio)}</td></tr>
     <tr class="highlight"><td>Debt to Equity</td><td class="right">${ratios.debtToEquity.toFixed(2)}</td></tr>
   </table>
 </div>
@@ -10034,8 +10048,8 @@ ${res.bs.borr > 0 ? `<h3>${noteN.borrowings}. ${isEN ? 'BORROWINGS' : 'PINJAMAN'
   <h3>Financial Ratios</h3>
   <table>
     <tr><th>Ratio</th><th class="right">Value</th><th>Status</th></tr>
-    <tr><td>Current Ratio</td><td class="right">${ratios.currentRatio.toFixed(2)}</td><td>${ratios.currentRatio >= 1 ? '✓ Good' : '⚠ Low'}</td></tr>
-    <tr><td>Quick Ratio</td><td class="right">${ratios.quickRatio.toFixed(2)}</td><td>${ratios.quickRatio >= 1 ? '✓ Good' : '⚠ Low'}</td></tr>
+    <tr><td>Current Ratio</td><td class="right">${fmtR(ratios.currentRatio)}</td><td>${ratios.currentRatio == null ? 'N/A' : ratios.currentRatio >= 1 ? '✓ Good' : '⚠ Low'}</td></tr>
+    <tr><td>Quick Ratio</td><td class="right">${fmtR(ratios.quickRatio)}</td><td>${ratios.quickRatio == null ? 'N/A' : ratios.quickRatio >= 1 ? '✓ Good' : '⚠ Low'}</td></tr>
     <tr><td>Debt to Equity</td><td class="right">${ratios.debtToEquity.toFixed(2)}</td><td>${ratios.debtToEquity <= 1 ? '✓ Good' : '⚠ High'}</td></tr>
     <tr><td>Return on Equity</td><td class="right">${fmtPct(ratios.roe)}</td><td>${ratios.roe >= 10 ? '✓ Good' : '⚠ Low'}</td></tr>
     <tr><td>Working Capital</td><td class="right">RM ${fmtNum(ratios.workingCapital)}</td><td>${ratios.workingCapital >= 0 ? '✓ Positive' : '⚠ Negative'}</td></tr>
@@ -10128,7 +10142,7 @@ ${res.bs.borr > 0 ? `<h3>${noteN.borrowings}. ${isEN ? 'BORROWINGS' : 'PINJAMAN'
     <tr class="highlight"><td>Untung Kasar</td><td class="right">RM ${fmtK(is.gp)} (${fmtPct(ratios.gpMargin)})</td></tr>
     <tr><td>Untung Bersih</td><td class="right">RM ${fmtK(is.np)} (${fmtPct(ratios.npMargin)})</td></tr>
     <tr class="highlight"><td>Baki Tunai</td><td class="right">RM ${fmtK(bs.cash)}</td></tr>
-    <tr><td>Nisbah Semasa</td><td class="right">${ratios.currentRatio.toFixed(2)}</td></tr>
+    <tr><td>Nisbah Semasa</td><td class="right">${fmtR(ratios.currentRatio)}</td></tr>
     <tr class="highlight"><td>Hutang kepada Ekuiti</td><td class="right">${ratios.debtToEquity.toFixed(2)}</td></tr>
   </table>
 </div>
@@ -10151,8 +10165,8 @@ ${res.bs.borr > 0 ? `<h3>${noteN.borrowings}. ${isEN ? 'BORROWINGS' : 'PINJAMAN'
   <h3>Nisbah Kewangan</h3>
   <table>
     <tr><th>Nisbah</th><th class="right">Nilai</th><th>Status</th></tr>
-    <tr><td>Nisbah Semasa</td><td class="right">${ratios.currentRatio.toFixed(2)}</td><td>${ratios.currentRatio >= 1 ? '✓ Baik' : '⚠ Rendah'}</td></tr>
-    <tr><td>Nisbah Cepat</td><td class="right">${ratios.quickRatio.toFixed(2)}</td><td>${ratios.quickRatio >= 1 ? '✓ Baik' : '⚠ Rendah'}</td></tr>
+    <tr><td>Nisbah Semasa</td><td class="right">${fmtR(ratios.currentRatio)}</td><td>${ratios.currentRatio == null ? 'N/A' : ratios.currentRatio >= 1 ? '✓ Baik' : '⚠ Rendah'}</td></tr>
+    <tr><td>Nisbah Cepat</td><td class="right">${fmtR(ratios.quickRatio)}</td><td>${ratios.quickRatio == null ? 'N/A' : ratios.quickRatio >= 1 ? '✓ Baik' : '⚠ Rendah'}</td></tr>
     <tr><td>Hutang kepada Ekuiti</td><td class="right">${ratios.debtToEquity.toFixed(2)}</td><td>${ratios.debtToEquity <= 1 ? '✓ Baik' : '⚠ Tinggi'}</td></tr>
     <tr><td>Pulangan atas Ekuiti</td><td class="right">${fmtPct(ratios.roe)}</td><td>${ratios.roe >= 10 ? '✓ Baik' : '⚠ Rendah'}</td></tr>
     <tr><td>Modal Kerja</td><td class="right">RM ${fmtNum(ratios.workingCapital)}</td><td>${ratios.workingCapital >= 0 ? '✓ Positif' : '⚠ Negatif'}</td></tr>
