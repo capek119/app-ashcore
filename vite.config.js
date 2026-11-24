@@ -9,4 +9,10 @@ export default defineConfig({
     emptyOutDir: true,    // clean old build files before each build
   },
   base: './',             // relative asset paths — works for any GitHub Pages subpath
+  server: {
+    proxy: {
+      // Local persistence API (see server/); dev-server only, not part of the build.
+      '/api': 'http://localhost:4000',
+    },
+  },
 })
