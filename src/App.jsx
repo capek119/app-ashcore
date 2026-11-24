@@ -1,4 +1,4 @@
-import React, { useState, useRef } from 'react';
+import React, { useState, useRef, useEffect } from 'react';
 import * as XLSX from 'xlsx';
 
 // ============================================
@@ -1599,6 +1599,13 @@ const sampleTxs = [
 ];
 
 export default function App() {
+  // ========== Local persistence (server/) ==========
+  const [companyId, setCompanyId] = useState(null);
+  const [companyList, setCompanyList] = useState([]);
+  const [loadingCompany, setLoadingCompany] = useState(true);
+  const [newCompanyName, setNewCompanyName] = useState('');
+  const [persistError, setPersistError] = useState('');
+
   const [tab, setTab] = useState('setup');
   const [companyType, setCompanyType] = useState('');
   const [companyName, setCompanyName] = useState('');
@@ -4419,30 +4426,58 @@ export default function App() {
     if (autoAdjustments.length > 0) {
       setAdjustmentLog(prev => [...autoAdjustments, ...prev]);
     }
-    
+
     setFsSnapshots(prev => [snapshot, ...prev]);
     setShowSnapshotModal(false);
     setSnapshotForm({ periodType: 'Monthly', periodLabel: '', note: '', createdBy: 'Accountant' });
-    
+
+    // Persist to the local server, if a company is open (optimistic — the
+    // snapshot is already in local state regardless of whether this succeeds).
+    if (companyId) {
+      fetch(`/api/companies/${companyId}/snapshots`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(snapshot),
+      }).catch(err => setPersistError(`Could not save snapshot to server: ${err.message}`));
+    }
+
     if (autoAdjustments.length > 0) {
       alert(`Snapshot saved: ${periodLabel} v${version}\n\n${autoAdjustments.length} change(s) auto-detected and logged.`);
     } else {
       alert(`Snapshot saved: ${periodLabel} v${version}`);
     }
   };
-  
+
   // Load snapshot into preview
-  const loadSnapshot = (snapshot) => {
-    if (confirm(`Load snapshot "${snapshot.periodLabel} v${snapshot.version}"?\n\nThis will show the snapshot's FS in the preview.`)) {
+  const loadSnapshot = async (snapshot) => {
+    if (!confirm(`Load snapshot "${snapshot.periodLabel} v${snapshot.version}"?\n\nThis will show the snapshot's FS in the preview.`)) return;
+
+    // Snapshots fetched from the server list don't include snapshotRes (kept
+    // light for listing) — fetch the full payload lazily here if needed.
+    if (snapshot.snapshotRes) {
       setRes(snapshot.snapshotRes);
-      setTab('journal');
+    } else if (companyId) {
+      try {
+        const r = await fetch(`/api/companies/${companyId}/snapshots/${snapshot.id}`);
+        if (!r.ok) throw new Error(`Failed to load snapshot (${r.status})`);
+        const full = await r.json();
+        setRes(full.payload.snapshotRes);
+      } catch (err) {
+        setPersistError(`Could not load snapshot: ${err.message}`);
+        return;
+      }
     }
+    setTab('journal');
   };
-  
+
   // Delete a snapshot
   const deleteSnapshot = (snapshotId) => {
     if (confirm('Delete this snapshot?')) {
       setFsSnapshots(prev => prev.filter(s => s.id !== snapshotId));
+      if (companyId) {
+        fetch(`/api/companies/${companyId}/snapshots/${snapshotId}`, { method: 'DELETE' })
+          .catch(err => setPersistError(`Could not delete snapshot on server: ${err.message}`));
+      }
     }
   };
   
@@ -9408,60 +9443,152 @@ ${res.bs.borr > 0 ? `<h3>${noteN.borrowings}. ${isEN ? 'BORROWINGS' : 'PINJAMAN'
     exportData(data, headers, `Chart_of_Accounts_${companyName.replace(/\s+/g, '_')}`, 'COA', format);
   };
 
+  // Build the entire session as a single plain object. Shared by the file-based
+  // save/load (below) and the server-backed persistence (loadCompanyFromServer /
+  // saveToServer, also below).
+  const buildStateBlob = () => ({
+    version: '2.0', // V10: New company workflow, SME qualification, 3-tier tax
+    savedAt: new Date().toISOString(),
+    // Company info
+    companyName,
+    companyRegNo,
+    companyType,
+    accountingStandard,
+    financialYearEnd,
+    currentYear,
+    priorFSYear,
+    // V10: New company workflow
+    isNewCompany,
+    incorporationDate,
+    reportingPeriodStart,
+    reportingPeriodEnd,
+    // V10: SME qualification
+    paidUpCapital,
+    grossBusinessIncome,
+    smeQualified,
+    // Prior year data (save the items, not the computed values)
+    priorISItems,
+    priorBSItems,
+    // Banks and transactions
+    banks,
+    bankStatements,
+    txs,
+    cashTxs,
+    ob,
+    // Subledger data
+    ppeRegister,
+    inventoryLedger,
+    tradeReceivables,
+    tradePayables,
+    otherDebtors,
+    otherCreditors,
+    cashBankLedger,
+    shortTermBorrowings,
+    longTermBorrowings,
+    // Capital Allowance Schedule
+    caScheduleItems,
+    // V9: CA Rates configuration
+    effectiveTaxYear,
+    // Tax settings
+    taxSettings,
+    // Snapshots and adjustments (kept here for the file export backup; the
+    // server stores snapshots separately — see saveToServer)
+    fsSnapshots,
+    adjustmentLog,
+    // Results (if generated)
+    res
+  });
+
+  // Restore every piece of state from a previously built state blob (either a
+  // loaded file, or a company state blob fetched from the server).
+  const applyStateBlob = (data) => {
+    // Restore company info
+    if (data.companyName) setCompanyName(data.companyName);
+    if (data.companyRegNo) setCompanyRegNo(data.companyRegNo);
+    if (data.companyType) setCompanyType(data.companyType);
+    if (data.accountingStandard) setAccountingStandard(data.accountingStandard);
+    if (data.financialYearEnd) setFinancialYearEnd(data.financialYearEnd);
+    if (data.currentYear) setCurrentYear(data.currentYear);
+    if (data.priorFSYear) setPriorFSYear(data.priorFSYear);
+
+    // V10: Restore new company workflow fields
+    if (data.isNewCompany !== undefined) setIsNewCompany(data.isNewCompany);
+    if (data.incorporationDate) setIncorporationDate(data.incorporationDate);
+    if (data.reportingPeriodStart) setReportingPeriodStart(data.reportingPeriodStart);
+    if (data.reportingPeriodEnd) setReportingPeriodEnd(data.reportingPeriodEnd);
+
+    // V10: Restore SME qualification fields
+    if (data.paidUpCapital !== undefined) setPaidUpCapital(data.paidUpCapital);
+    if (data.grossBusinessIncome !== undefined) setGrossBusinessIncome(data.grossBusinessIncome);
+    if (data.smeQualified !== undefined) setSmeQualified(data.smeQualified);
+
+    // Restore prior year data
+    if (data.priorISItems) setPriorISItems(data.priorISItems);
+    if (data.priorBSItems) setPriorBSItems(data.priorBSItems);
+
+    // Restore banks and transactions
+    if (data.banks) setBanks(data.banks);
+    if (data.bankStatements) setBankStatements(data.bankStatements);
+    if (data.txs) setTxs(data.txs);
+    if (data.cashTxs) setCashTxs(data.cashTxs);
+    if (data.ob) setOb(data.ob);
+
+    // Restore subledger data
+    if (data.ppeRegister) setPpeRegister(data.ppeRegister);
+    if (data.inventoryLedger) setInventoryLedger(data.inventoryLedger);
+    if (data.tradeReceivables) setTradeReceivables(data.tradeReceivables);
+    if (data.tradePayables) setTradePayables(data.tradePayables);
+    if (data.otherDebtors) setOtherDebtors(data.otherDebtors);
+    if (data.otherCreditors) setOtherCreditors(data.otherCreditors);
+    if (data.cashBankLedger) setCashBankLedger(data.cashBankLedger);
+    if (data.shortTermBorrowings) setShortTermBorrowings(data.shortTermBorrowings);
+    if (data.longTermBorrowings) setLongTermBorrowings(data.longTermBorrowings);
+
+    // Restore Capital Allowance Schedule
+    if (data.caScheduleItems) setCaScheduleItems(data.caScheduleItems);
+
+    // V9: Restore effective tax year
+    if (data.effectiveTaxYear) setEffectiveTaxYear(data.effectiveTaxYear);
+
+    // Restore snapshots and adjustments (v1.2+) — absent when loading a server
+    // state blob, since those are fetched separately from /snapshots.
+    if (data.fsSnapshots) setFsSnapshots(data.fsSnapshots);
+    if (data.adjustmentLog) setAdjustmentLog(data.adjustmentLog);
+
+    // Restore tax settings (merge with defaults to handle old sessions)
+    // V10: Handle migration from 2-tier to 3-tier tax settings
+    if (data.taxSettings) {
+      setTaxSettings(prev => ({
+        ...prev,
+        ...data.taxSettings,
+        // V10: Ensure 3-tier structure exists (migrate from old 2-tier)
+        sdnBhd: {
+          tier1Limit: data.taxSettings.sdnBhd?.tier1Limit || 150000,
+          tier1Rate: data.taxSettings.sdnBhd?.tier1Rate || 15,
+          tier2Limit: data.taxSettings.sdnBhd?.tier2Limit || 450000,
+          tier2Rate: data.taxSettings.sdnBhd?.tier2Rate || 17,
+          tier3Rate: data.taxSettings.sdnBhd?.tier3Rate || data.taxSettings.sdnBhd?.tier2Rate || 24,
+        },
+        nonSmeRate: data.taxSettings.nonSmeRate || 24,
+        addBackExpenses: {
+          ...prev.addBackExpenses,
+          ...(data.taxSettings.addBackExpenses || {})
+        },
+        taxRebates: {
+          ...prev.taxRebates,
+          ...(data.taxSettings.taxRebates || {})
+        }
+      }));
+    }
+
+    // Restore results
+    if (data.res) setRes(data.res);
+  };
+
   // Save entire session to file
   const saveSession = () => {
-    const sessionData = {
-      version: '2.0', // V10: New company workflow, SME qualification, 3-tier tax
-      savedAt: new Date().toISOString(),
-      // Company info
-      companyName,
-      companyRegNo,
-      companyType,
-      accountingStandard,
-      financialYearEnd,
-      currentYear,
-      priorFSYear,
-      // V10: New company workflow
-      isNewCompany,
-      incorporationDate,
-      reportingPeriodStart,
-      reportingPeriodEnd,
-      // V10: SME qualification
-      paidUpCapital,
-      grossBusinessIncome,
-      smeQualified,
-      // Prior year data (save the items, not the computed values)
-      priorISItems,
-      priorBSItems,
-      // Banks and transactions
-      banks,
-      bankStatements,
-      txs,
-      cashTxs,
-      ob,
-      // Subledger data
-      ppeRegister,
-      inventoryLedger,
-      tradeReceivables,
-      tradePayables,
-      otherDebtors,
-      otherCreditors,
-      cashBankLedger,
-      shortTermBorrowings,
-      longTermBorrowings,
-      // Capital Allowance Schedule
-      caScheduleItems,
-      // V9: CA Rates configuration
-      effectiveTaxYear,
-      // Tax settings
-      taxSettings,
-      // Snapshots and adjustments
-      fsSnapshots,
-      adjustmentLog,
-      // Results (if generated)
-      res
-    };
-    
+    const sessionData = buildStateBlob();
+
     const jsonStr = JSON.stringify(sessionData, null, 2);
     
     // Try download first
@@ -9487,88 +9614,9 @@ ${res.bs.borr > 0 ? `<h3>${noteN.borrowings}. ${isEN ? 'BORROWINGS' : 'PINJAMAN'
     reader.onload = (event) => {
       try {
         const data = JSON.parse(event.target.result);
-        
-        // Restore company info
-        if (data.companyName) setCompanyName(data.companyName);
-        if (data.companyRegNo) setCompanyRegNo(data.companyRegNo);
-        if (data.companyType) setCompanyType(data.companyType);
-        if (data.accountingStandard) setAccountingStandard(data.accountingStandard);
-        if (data.financialYearEnd) setFinancialYearEnd(data.financialYearEnd);
-        if (data.currentYear) setCurrentYear(data.currentYear);
-        if (data.priorFSYear) setPriorFSYear(data.priorFSYear);
-        
-        // V10: Restore new company workflow fields
-        if (data.isNewCompany !== undefined) setIsNewCompany(data.isNewCompany);
-        if (data.incorporationDate) setIncorporationDate(data.incorporationDate);
-        if (data.reportingPeriodStart) setReportingPeriodStart(data.reportingPeriodStart);
-        if (data.reportingPeriodEnd) setReportingPeriodEnd(data.reportingPeriodEnd);
-        
-        // V10: Restore SME qualification fields
-        if (data.paidUpCapital !== undefined) setPaidUpCapital(data.paidUpCapital);
-        if (data.grossBusinessIncome !== undefined) setGrossBusinessIncome(data.grossBusinessIncome);
-        if (data.smeQualified !== undefined) setSmeQualified(data.smeQualified);
-        
-        // Restore prior year data
-        if (data.priorISItems) setPriorISItems(data.priorISItems);
-        if (data.priorBSItems) setPriorBSItems(data.priorBSItems);
-        
-        // Restore banks and transactions
-        if (data.banks) setBanks(data.banks);
-        if (data.bankStatements) setBankStatements(data.bankStatements);
-        if (data.txs) setTxs(data.txs);
-        if (data.cashTxs) setCashTxs(data.cashTxs);
-        if (data.ob) setOb(data.ob);
-        
-        // Restore subledger data
-        if (data.ppeRegister) setPpeRegister(data.ppeRegister);
-        if (data.inventoryLedger) setInventoryLedger(data.inventoryLedger);
-        if (data.tradeReceivables) setTradeReceivables(data.tradeReceivables);
-        if (data.tradePayables) setTradePayables(data.tradePayables);
-        if (data.otherDebtors) setOtherDebtors(data.otherDebtors);
-        if (data.otherCreditors) setOtherCreditors(data.otherCreditors);
-        if (data.cashBankLedger) setCashBankLedger(data.cashBankLedger);
-        if (data.shortTermBorrowings) setShortTermBorrowings(data.shortTermBorrowings);
-        if (data.longTermBorrowings) setLongTermBorrowings(data.longTermBorrowings);
-        
-        // Restore Capital Allowance Schedule
-        if (data.caScheduleItems) setCaScheduleItems(data.caScheduleItems);
-        
-        // V9: Restore effective tax year
-        if (data.effectiveTaxYear) setEffectiveTaxYear(data.effectiveTaxYear);
-        
-        // Restore snapshots and adjustments (v1.2+)
-        if (data.fsSnapshots) setFsSnapshots(data.fsSnapshots);
-        if (data.adjustmentLog) setAdjustmentLog(data.adjustmentLog);
-        
-        // Restore tax settings (merge with defaults to handle old sessions)
-        // V10: Handle migration from 2-tier to 3-tier tax settings
-        if (data.taxSettings) {
-          setTaxSettings(prev => ({
-            ...prev,
-            ...data.taxSettings,
-            // V10: Ensure 3-tier structure exists (migrate from old 2-tier)
-            sdnBhd: {
-              tier1Limit: data.taxSettings.sdnBhd?.tier1Limit || 150000,
-              tier1Rate: data.taxSettings.sdnBhd?.tier1Rate || 15,
-              tier2Limit: data.taxSettings.sdnBhd?.tier2Limit || 450000,
-              tier2Rate: data.taxSettings.sdnBhd?.tier2Rate || 17,
-              tier3Rate: data.taxSettings.sdnBhd?.tier3Rate || data.taxSettings.sdnBhd?.tier2Rate || 24,
-            },
-            nonSmeRate: data.taxSettings.nonSmeRate || 24,
-            addBackExpenses: {
-              ...prev.addBackExpenses,
-              ...(data.taxSettings.addBackExpenses || {})
-            },
-            taxRebates: {
-              ...prev.taxRebates,
-              ...(data.taxSettings.taxRebates || {})
-            }
-          }));
-        }
-        
-        // Restore results
-        if (data.res) setRes(data.res);
-        
+
+        applyStateBlob(data);
+
         setLogs(prev => [...prev, { t: 'ok', m: `Session loaded: ${file.name} (saved ${data.savedAt ? new Date(data.savedAt).toLocaleString() : 'unknown'})` }]);
         
         // Navigate to appropriate tab
@@ -9589,7 +9637,94 @@ ${res.bs.borr > 0 ? `<h3>${noteN.borrowings}. ${isEN ? 'BORROWINGS' : 'PINJAMAN'
     e.target.value = ''; // Reset file input
   };
 
-  const clearAll = () => { 
+  // ========== Local persistence server (server/) ==========
+  const LAST_COMPANY_KEY = 'ashcore_last_company_id';
+
+  const loadCompanyFromServer = async (id) => {
+    setPersistError('');
+    const res = await fetch(`/api/companies/${id}`);
+    if (!res.ok) throw new Error(`Failed to load company ${id} (${res.status})`);
+    const company = await res.json();
+    applyStateBlob(company.state || {});
+
+    const snapRes = await fetch(`/api/companies/${id}/snapshots`);
+    if (snapRes.ok) {
+      const snaps = await snapRes.json();
+      setFsSnapshots(snaps.map(s => ({
+        id: s.id,
+        periodType: s.periodType,
+        periodLabel: s.periodLabel,
+        version: s.version,
+        createdAt: s.createdAt,
+        createdBy: s.createdBy,
+        note: s.note,
+        previousVersionId: s.previousVersionId,
+        // snapshotRes/snapshotMeta are fetched lazily when a snapshot is opened
+        // (see loadSnapshot), so lists stay light even with many snapshots.
+      })));
+    }
+
+    setCompanyId(id);
+    localStorage.setItem(LAST_COMPANY_KEY, String(id));
+  };
+
+  const createCompanyOnServer = async (name) => {
+    setPersistError('');
+    const res = await fetch('/api/companies', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ name }),
+    });
+    if (!res.ok) throw new Error(`Failed to create company (${res.status})`);
+    const company = await res.json();
+    setCompanyList(prev => [company, ...prev]);
+    setCompanyId(company.id);
+    localStorage.setItem(LAST_COMPANY_KEY, String(company.id));
+  };
+
+  const saveToServer = async () => {
+    if (!companyId) return;
+    setPersistError('');
+    try {
+      const { fsSnapshots: _omit, ...stateWithoutSnapshots } = buildStateBlob();
+      const res = await fetch(`/api/companies/${companyId}/state`, {
+        method: 'PUT',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(stateWithoutSnapshots),
+      });
+      if (!res.ok) throw new Error(`Save failed (${res.status})`);
+      setLogs(prev => [...prev, { t: 'ok', m: 'Saved to server' }]);
+    } catch (err) {
+      setPersistError(`Could not save to server: ${err.message}`);
+    }
+  };
+
+  useEffect(() => {
+    let cancelled = false;
+    (async () => {
+      try {
+        const res = await fetch('/api/companies');
+        if (!res.ok) throw new Error(`Failed to list companies (${res.status})`);
+        const list = await res.json();
+        if (cancelled) return;
+        setCompanyList(list);
+
+        const lastId = localStorage.getItem(LAST_COMPANY_KEY);
+        const lastIdNum = lastId ? Number(lastId) : null;
+        if (lastIdNum && list.some(c => c.id === lastIdNum)) {
+          await loadCompanyFromServer(lastIdNum);
+        }
+      } catch (err) {
+        if (!cancelled) setPersistError(`Could not reach local server: ${err.message}`);
+      } finally {
+        if (!cancelled) setLoadingCompany(false);
+      }
+    })();
+    return () => { cancelled = true; };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+
+  const clearAll = () => {
     setTxs([]); setCashTxs([]); setBanks([]); setBankStatements({}); setLogs([]); setRes(null); setOb({}); 
     setPriorFSApplied(false); // Reset prior FS applied flag
     // Reset Prior FS Items to defaults using generators (maintains consistency with FS_STRUCTURE)
@@ -9644,6 +9779,70 @@ ${res.bs.borr > 0 ? `<h3>${noteN.borrowings}. ${isEN ? 'BORROWINGS' : 'PINJAMAN'
   const navTabs = ['setup', 'priorfs', 'banks', 'upload', 'review', 'classify', 'cashvoucher', 'subledger', 'balances', 'journal', 'trial', 'income', 'balance', 'cashflow', 'tax', 'snapshots', 'dashboard'];
   const goBack = () => { const idx = navTabs.indexOf(tab); if (idx > 0) setTab(navTabs[idx - 1]); };
   const goNext = () => { const idx = navTabs.indexOf(tab); if (idx < navTabs.length - 1) setTab(navTabs[idx + 1]); };
+
+  // ========== Company picker (local server persistence) ==========
+  // Gate the whole app behind picking/creating a company so every tab below
+  // works against a server-backed record. None of the existing tab logic
+  // changes — this is just an early return.
+  if (loadingCompany) {
+    return (
+      <div style={{ minHeight: '100vh', display: 'flex', alignItems: 'center', justifyContent: 'center', background: '#111827', color: '#9ca3af', fontFamily: '-apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif' }}>
+        Loading…
+      </div>
+    );
+  }
+
+  if (!companyId) {
+    return (
+      <div style={{ minHeight: '100vh', display: 'flex', alignItems: 'center', justifyContent: 'center', background: 'linear-gradient(145deg, #111827 0%, #1f2937 100%)', fontFamily: '-apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif', color: '#e5e7eb' }}>
+        <div style={{ background: 'linear-gradient(145deg, #1f2937, #111827)', borderRadius: 16, border: '1px solid rgba(75,85,99,0.3)', padding: 24, maxWidth: 420, width: '90%' }}>
+          <h2 style={{ margin: '0 0 4px', fontSize: 18, fontWeight: 800 }}>
+            <span style={{ color: '#E85525' }}>ash</span>core
+          </h2>
+          <p style={{ margin: '0 0 16px', fontSize: 12, color: '#9ca3af' }}>Open an existing company or create a new one.</p>
+
+          {persistError && (
+            <div style={{ marginBottom: 12, padding: 10, borderRadius: 6, background: 'rgba(239,68,68,0.12)', border: '1px solid rgba(239,68,68,0.3)', color: '#fca5a5', fontSize: 11 }}>
+              {persistError} — is the local server running (<code>cd server && npm run dev</code>)?
+            </div>
+          )}
+
+          {companyList.length > 0 && (
+            <div style={{ marginBottom: 16, display: 'flex', flexDirection: 'column', gap: 6, maxHeight: 220, overflowY: 'auto' }}>
+              {companyList.map(c => (
+                <button
+                  key={c.id}
+                  onClick={() => loadCompanyFromServer(c.id).catch(err => setPersistError(err.message))}
+                  style={{ textAlign: 'left', padding: '10px 12px', background: 'rgba(99,102,241,0.1)', border: '1px solid rgba(99,102,241,0.25)', borderRadius: 8, color: '#e5e7eb', cursor: 'pointer' }}
+                >
+                  <div style={{ fontSize: 13, fontWeight: 700 }}>{c.name}</div>
+                  <div style={{ fontSize: 10, color: '#9ca3af' }}>{c.regNo || 'No reg. no.'} • updated {new Date(c.updatedAt).toLocaleString()}</div>
+                </button>
+              ))}
+            </div>
+          )}
+
+          <div style={{ display: 'flex', gap: 6 }}>
+            <input
+              value={newCompanyName}
+              onChange={e => setNewCompanyName(e.target.value)}
+              placeholder="New company name"
+              style={{ flex: 1, padding: '8px 10px', borderRadius: 6, border: '1px solid rgba(75,85,99,0.4)', background: 'rgba(17,24,39,0.6)', color: '#e5e7eb', fontSize: 12 }}
+            />
+            <button
+              onClick={() => {
+                if (!newCompanyName.trim()) return;
+                createCompanyOnServer(newCompanyName.trim())
+                  .then(() => setNewCompanyName(''))
+                  .catch(err => setPersistError(err.message));
+              }}
+              style={{ padding: '8px 14px', background: 'linear-gradient(135deg, #6366f1, #4f46e5)', border: 'none', borderRadius: 6, color: '#fff', fontSize: 12, fontWeight: 700, cursor: 'pointer' }}
+            >New</button>
+          </div>
+        </div>
+      </div>
+    );
+  }
 
   return (
     <div style={{ minHeight: '100vh', background: 'linear-gradient(145deg, #111827 0%, #1f2937 100%)', fontFamily: '-apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif', color: '#e5e7eb' }}>
@@ -10377,11 +10576,19 @@ ${res.bs.borr > 0 ? `<h3>${noteN.borrowings}. ${isEN ? 'BORROWINGS' : 'PINJAMAN'
             >📂 Load</button>
             {/* Save Session */}
             {(companyName || txs.length > 0) && (
-              <button 
-                onClick={saveSession} 
+              <button
+                onClick={saveSession}
                 style={{ padding: '6px 12px', background: 'rgba(59,130,246,0.15)', border: '1px solid rgba(59,130,246,0.3)', borderRadius: 6, color: '#93c5fd', fontSize: 11, fontWeight: 600, cursor: 'pointer' }}
                 title="Save current session to file"
               >💾 Save</button>
+            )}
+            {/* Save to local server */}
+            {companyId && (
+              <button
+                onClick={saveToServer}
+                style={{ padding: '6px 12px', background: 'rgba(16,185,129,0.15)', border: '1px solid rgba(16,185,129,0.3)', borderRadius: 6, color: '#6ee7b7', fontSize: 11, fontWeight: 600, cursor: 'pointer' }}
+                title="Save current session to the local server (persists across restarts)"
+              >💾 Save to server</button>
             )}
             <button onClick={loadSample} style={{ padding: '6px 12px', background: 'rgba(99,102,241,0.15)', border: '1px solid rgba(99,102,241,0.3)', borderRadius: 6, color: '#a5b4fc', fontSize: 11, fontWeight: 600, cursor: 'pointer' }}>Sample</button>
             {txs.length > 0 && <button onClick={clearAll} style={{ padding: '6px 12px', background: 'rgba(239,68,68,0.15)', border: '1px solid rgba(239,68,68,0.3)', borderRadius: 6, color: '#fca5a5', fontSize: 11, fontWeight: 600, cursor: 'pointer' }}>Clear</button>}
