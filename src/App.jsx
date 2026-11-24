@@ -1,5 +1,79 @@
 import React, { useState, useRef, useEffect } from 'react';
 import * as XLSX from 'xlsx';
+import * as pdfjsLib from 'pdfjs-dist';
+import pdfjsWorker from 'pdfjs-dist/build/pdf.worker.min.mjs?url';
+
+pdfjsLib.GlobalWorkerOptions.workerSrc = pdfjsWorker;
+
+// Extract text from a PDF as tab-separated rows, so the result can be fed
+// through the same tab-delimited parsing parseCSVText already uses for
+// manually pasted statement text. PDF text items don't come in reading
+// order and a blank cell (e.g. an empty Debit column) emits no item at all,
+// so naively joining items left-to-right on a row loses column alignment
+// whenever a cell is blank. Instead: group items into visual rows by
+// y-position, find the header row (contains "date"/"tarikh", same as
+// parseCSVText's own header detection), and use its items' x-positions as
+// column boundaries — every other row's items are bucketed into whichever
+// column their x-position falls under, leaving blank cells genuinely blank.
+async function extractTextFromPdf(file) {
+  const arrayBuffer = await file.arrayBuffer();
+  const pdf = await pdfjsLib.getDocument({ data: arrayBuffer }).promise;
+  const Y_TOLERANCE = 2;
+  const rows = [];
+
+  for (let pageNum = 1; pageNum <= pdf.numPages; pageNum++) {
+    const page = await pdf.getPage(pageNum);
+    const content = await page.getTextContent();
+    const items = content.items.filter(it => it.str !== undefined);
+    // Sort top-to-bottom, then left-to-right (PDF y grows upward).
+    items.sort((a, b) => b.transform[5] - a.transform[5] || a.transform[4] - b.transform[4]);
+
+    let current = [];
+    let currentY = null;
+    const flushRow = () => {
+      const nonWhitespace = current
+        .filter(it => it.str.trim() !== '')
+        .map(it => ({ x: it.transform[4], str: it.str.trim() }))
+        .sort((a, b) => a.x - b.x);
+      if (nonWhitespace.length) rows.push(nonWhitespace);
+    };
+    items.forEach(item => {
+      const y = item.transform[5];
+      if (currentY === null || Math.abs(y - currentY) <= Y_TOLERANCE) {
+        current.push(item);
+        if (currentY === null) currentY = y;
+      } else {
+        flushRow();
+        current = [item];
+        currentY = y;
+      }
+    });
+    flushRow();
+  }
+
+  if (!rows.length) return '';
+
+  const headerRow = rows.find(row => row.some(it => /date|tarikh/i.test(it.str)));
+  if (!headerRow) {
+    // No recognizable header — best effort, just tab-join each row's items.
+    return rows.map(row => row.map(it => it.str).join('\t')).join('\n');
+  }
+
+  const boundaries = headerRow.map(it => it.x).sort((a, b) => a - b);
+  const toColumns = (row) => {
+    const cols = new Array(boundaries.length).fill('');
+    row.forEach(it => {
+      let colIdx = 0;
+      for (let i = 0; i < boundaries.length; i++) {
+        if (it.x >= boundaries[i] - 2) colIdx = i;
+      }
+      cols[colIdx] = cols[colIdx] ? `${cols[colIdx]} ${it.str}` : it.str;
+    });
+    return cols.join('\t');
+  };
+
+  return rows.map(toColumns).join('\n');
+}
 
 // ============================================
 // Management Account Automation — MAA V1.0
@@ -3390,15 +3464,15 @@ export default function App() {
         }]);
         
       } else if (fileName.endsWith('.pdf')) {
-        // PDF file - show instruction for manual paste
-        setLogs(prev => [...prev, { 
-          t: 'warn', 
-          m: `📄 PDF detected. Please open the PDF, copy (Ctrl+A, Ctrl+C) and paste the text below.` 
-        }]);
-        setPriorFSRawData([]);
-        // Show the PDF paste area
+        setLogs(prev => [...prev, { t: 'info', m: `📄 Extracting text from PDF: ${file.name}...` }]);
+        const extractedText = await extractTextFromPdf(file);
+        setPriorFSPastedText(extractedText);
+        // parsePriorFSText sets priorFSRawData and logs its own result count;
+        // if it finds nothing (e.g. scanned PDF), the extracted text is still
+        // pre-filled above for manual review/editing.
+        parsePriorFSText(extractedText);
         setPriorFSMode('upload');
-        
+
       } else {
         // CSV/TXT file
         const text = await file.text();
@@ -3734,23 +3808,52 @@ export default function App() {
     let newLogs = [...logs];
     
     for (const file of files) {
+      const isPDF = file.type === 'application/pdf' || file.name.toLowerCase().endsWith('.pdf');
       try {
-        const isPDF = file.type === 'application/pdf' || file.name.toLowerCase().endsWith('.pdf');
         const isExcel = file.name.toLowerCase().endsWith('.xlsx') || file.name.toLowerCase().endsWith('.xls');
-        
+
         if (isPDF) {
-          newLogs.push({ t: 'info', m: `📄 PDF detected: ${file.name}` });
-          newLogs.push({ t: 'warn', m: `⚠ PDF parsing requires manual text extraction. Please copy text from PDF and paste below.` });
+          const readingMsg = `📄 Extracting text from PDF: ${file.name}...`;
+          newLogs.push({ t: 'info', m: readingMsg });
           setLogs([...newLogs]);
-          
-          // Store file info but mark as needs manual processing
-          setBankStatements(prev => ({
-            ...prev,
-            [selectedBank]: {
-              ...prev[selectedBank],
-              [selectedMonth]: { uploaded: true, txCount: 0, file: file.name, needsManual: true }
-            }
-          }));
+
+          const extractedText = await extractTextFromPdf(file);
+          const bank = banks.find(b => b.id === selectedBank);
+          const { transactions: parsed, openingBalance: parsedOB } = parseCSVText(extractedText, file.name, bank?.name || selectedBank, selectedMonth, currentYear);
+
+          newLogs = newLogs.filter(log => log.m !== readingMsg);
+
+          if (parsedOB !== null && bank) {
+            const obKey = `bank_${(bank.name || selectedBank).toLowerCase().replace(/\s+/g, '_')}`;
+            setSuggestedObFromBank(prev => ({ ...prev, [obKey]: { amount: parsedOB, bankName: bank.name, month: selectedMonth } }));
+            newLogs.push({ t: 'warn', m: `💡 Opening balance RM ${parsedOB.toLocaleString('en-MY')} detected from Balance B/F in ${bank.name} ${selectedMonth} statement → go to Opening Balances tab to confirm` });
+          }
+
+          if (parsed.length > 0) {
+            setTxs(prev => [...prev, ...parsed]);
+            setBankStatements(prev => ({
+              ...prev,
+              [selectedBank]: {
+                ...prev[selectedBank],
+                [selectedMonth]: { uploaded: true, txCount: parsed.length, file: file.name }
+              }
+            }));
+            newLogs.push({ t: 'ok', m: `✓ ${file.name}: ${parsed.length} transactions extracted from PDF (${bank?.name} - ${selectedMonth})` });
+          } else {
+            // Couldn't find transaction rows in the extracted text (unusual layout,
+            // or a scanned/image PDF with no text layer) — fall back to manual
+            // paste, pre-filled with whatever text was extracted so it can be
+            // reviewed/corrected instead of re-typed from scratch.
+            setPdfText(extractedText);
+            setBankStatements(prev => ({
+              ...prev,
+              [selectedBank]: {
+                ...prev[selectedBank],
+                [selectedMonth]: { uploaded: true, txCount: 0, file: file.name, needsManual: true }
+              }
+            }));
+            newLogs.push({ t: 'warn', m: `⚠ ${file.name}: Couldn't find transactions in the extracted text (may be a scanned PDF). Review/edit the text below and click "Parse PDF Text".` });
+          }
         } else if (isExcel) {
           // Excel file processing using SheetJS
           const readingMsg = `Reading Excel: ${file.name}...`;
@@ -3825,13 +3928,22 @@ export default function App() {
           }
         }
       } catch (err) {
-        // Remove any "Reading:" message on error too
-        newLogs = newLogs.filter(log => !log.m.includes('Reading:'));
-        newLogs.push({ t: 'err', m: `✗ ${file.name}: ${err.message}` });
+        // Remove any "Reading:"/"Extracting..." progress message on error too
+        newLogs = newLogs.filter(log => !log.m.includes('Reading:') && !log.m.includes('Extracting text from PDF'));
+        newLogs.push({ t: 'err', m: `✗ ${file.name}: ${err.message}${isPDF ? '. You can paste the statement text manually below instead.' : ''}` });
+        if (isPDF) {
+          setBankStatements(prev => ({
+            ...prev,
+            [selectedBank]: {
+              ...prev[selectedBank],
+              [selectedMonth]: { uploaded: true, txCount: 0, file: file.name, needsManual: true }
+            }
+          }));
+        }
       }
       setLogs([...newLogs]);
     }
-    
+
     setBusy(false);
     if (fileRef.current) fileRef.current.value = '';
   };
